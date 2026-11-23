@@ -833,6 +833,7 @@ class RealNvdaIntegrationShimTests(unittest.TestCase):
         driver._playerFeedLock = threading.RLock()
         driver._cacheLock = threading.RLock()
         driver._shortAudioCache = OrderedDict()
+        driver._shortAudioTimepointsCache = OrderedDict()
         driver._shortAudioCacheBytes = 0
         driver._shortAudioCacheHits = 0
         driver._shortAudioCacheMisses = 0
@@ -3710,6 +3711,170 @@ class RealNvdaIntegrationShimTests(unittest.TestCase):
         self.assertFalse(
             any(t.is_alive() and t.name == "googleTtsForNvda.audioConsumer" for t in threading.enumerate())
         )
+
+    def test_wasm_timepoint_sample_splitting_waveplayer_ondone_and_checkpoint_cache(self) -> None:
+        """Verify WASM sample-offset splits, WavePlayer.feed(onDone=...), cancel gating, and checkpoint caching."""
+        fed_callbacks: list[tuple[bytes, Any]] = []
+        notified: list[int] = []
+        bridge_calls = 0
+
+        def feed_with_ondone(pcmChunk: bytes, onDone: Any = None) -> None:
+            fed_callbacks.append((pcmChunk, onDone))
+
+        def fake_bridge_speak(
+            _text: str,
+            _options: dict[str, Any],
+            onAudio: Any,
+            cancelEvent: Any = None,
+            onMark: Any = None,
+            onSegmentEnd: Any = None,
+            **_kwargs: Any,
+        ) -> dict[str, Any]:
+            nonlocal bridge_calls
+            bridge_calls += 1
+            audibleChunk = b"\x00\x04" * 2400  # 2400 samples @ 24kHz = 100 ms
+            silentTail = b"\x00\x00" * 7200  # 300 ms trailing silence
+            for idx in range(10):
+                if cancelEvent is not None and cancelEvent.is_set():
+                    return {"success": False, "cancelled": True, "done": False, "segmentEnds": 0}
+                if onMark is not None:
+                    if idx == 0:
+                        onMark(0, 240)
+                    elif idx == 1:
+                        onMark(5, 3600)
+                    elif idx == 4:
+                        onMark(10, 10800)
+                    elif idx == 7:
+                        onMark(16, 16800)
+                onAudio(audibleChunk)
+            onAudio(silentTail)
+            if onSegmentEnd is not None:
+                onSegmentEnd()
+            return {"success": True, "done": True, "segmentEnds": 0}
+
+        driver = self._make_real_driver(
+            bridgeSpeak=fake_bridge_speak,
+            player=self._make_fake_player(feed=feed_with_ondone),
+            pauseMode=self.synthMod._PAUSE_MODE_SHORTEN_END_ONLY,
+        )
+        opts = driver._speech_options(50, 50, 100, "en1", False)
+        text = "alpha beta gamma delta."
+        pauseMode = self.synthMod._PAUSE_MODE_SHORTEN_END_ONLY
+        cacheKey = driver._short_cache_key(text, opts, None, pauseMode)
+
+        with mock.patch.object(
+            self.stubs["synthDriverHandler"].synthIndexReached,
+            "notify",
+            side_effect=lambda **kw: notified.append(kw["index"]),
+        ):
+            # 1. Live stream splits PCM at sampleOffset and defers synthIndexReached until onDone runs.
+            driver._speak_text(
+                text,
+                opts,
+                threading.Event(),
+                indexes=[(11, 5), (22, 10), (33, 16)],
+                pauseShorteningMode=pauseMode,
+            )
+            self.assertEqual(1, bridge_calls)
+            self.assertEqual([], notified)
+            self.assertGreater(len(fed_callbacks), 4)
+
+            bytesBeforeIndex: list[int] = []
+            playedBytes = 0
+            for chunkBytes, cb in fed_callbacks:
+                playedBytes += len(chunkBytes)
+                beforeCount = len(notified)
+                if cb is not None:
+                    cb()
+                if len(notified) > beforeCount:
+                    bytesBeforeIndex.append(playedBytes)
+            self.assertEqual([11, 22, 33], notified)
+            # Total bytes played before marks 5, 10, 16 match exact sample offsets (7200, 21600, 33600).
+            self.assertEqual([7200, 21600, 33600], bytesBeforeIndex)
+
+            cachedCheckpoints = driver._get_cached_timepoints(cacheKey)
+            self.assertEqual(((0, 480), (5, 7200), (10, 21600), (16, 33600)), cachedCheckpoints)
+
+            # 2. Cache hit skips bridge.speak while reproducing exact split byte boundaries on onDone.
+            fed_callbacks.clear()
+            notified.clear()
+            driver._speak_text(
+                text,
+                opts,
+                threading.Event(),
+                indexes=[(101, 5), (102, 10), (103, 16)],
+                pauseShorteningMode=pauseMode,
+            )
+            self.assertEqual(1, bridge_calls)
+            self.assertEqual([], notified)
+            cachedBytesBeforeIndex: list[int] = []
+            playedBytes = 0
+            for chunkBytes, cb in fed_callbacks:
+                playedBytes += len(chunkBytes)
+                beforeCount = len(notified)
+                if cb is not None:
+                    cb()
+                if len(notified) > beforeCount:
+                    cachedBytesBeforeIndex.append(playedBytes)
+            self.assertEqual([101, 102, 103], notified)
+            self.assertEqual([7200, 21600, 33600], cachedBytesBeforeIndex)
+
+            driver._clear_short_audio_cache()
+            self.assertIsNone(driver._get_cached_timepoints(cacheKey))
+
+            # 3. Late onDone callbacks after cancelEvent must not notify synthIndexReached.
+            fed_callbacks.clear()
+            notified.clear()
+            cancelEv = threading.Event()
+            driver._speak_text(
+                text,
+                opts,
+                cancelEv,
+                indexes=[(201, 5), (202, 10), (203, 16)],
+                pauseShorteningMode=self.synthMod._PAUSE_MODE_DO_NOT_SHORTEN,
+            )
+            self.assertEqual([], notified)
+            cancelEv.set()
+            for _chunkBytes, cb in fed_callbacks:
+                if cb is not None:
+                    cb()
+            self.assertEqual([], notified)
+
+            # 4. Pre-block early marks buffered by PcmSilenceShortener (< 120 samples) must defer until first onDone.
+            fed_callbacks.clear()
+            notified.clear()
+            driver._bridge = SimpleNamespace(
+                speak=lambda _t, _o, onAudio, _cancel, onMark=None, **_kw: (
+                    onMark(2, 100) if onMark is not None else None,
+                    onAudio(b"\x00\x04" * 2400),
+                    {"success": True, "done": True, "segmentEnds": 0},
+                )[-1]
+            )
+            driver._speak_text(
+                "hi there",
+                opts,
+                threading.Event(),
+                indexes=[(401, 2)],
+                pauseShorteningMode=self.synthMod._PAUSE_MODE_SHORTEN_ALL,
+            )
+            self.assertEqual([], notified)
+            for _chunkBytes, cb in fed_callbacks:
+                if cb is not None:
+                    cb()
+            self.assertEqual([401], notified)
+
+            # 5. Fake players without onDone parameter still receive indexes synchronously without hanging.
+            notified.clear()
+            driver._bridge = SimpleNamespace(speak=fake_bridge_speak)
+            driver._player = self._make_fake_player()
+            driver._speak_text(
+                "legacy fake player.",
+                opts,
+                threading.Event(),
+                indexes=[(301, 5), (302, 12)],
+                pauseShorteningMode=self.synthMod._PAUSE_MODE_DO_NOT_SHORTEN,
+            )
+            self.assertEqual([301, 302], notified)
 
 
 if __name__ == "__main__":

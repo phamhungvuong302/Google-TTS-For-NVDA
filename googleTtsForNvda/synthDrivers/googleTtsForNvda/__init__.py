@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import bisect
 import inspect
 import json
 import math
 import queue
 import threading
 from collections import OrderedDict, deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, nullcontext, suppress
 from typing import Any
 
@@ -77,6 +78,7 @@ from .speech_processing import (
     PcmLeadBuffer,
     create_pcm_silence_shortener,
     effective_chrome_rate,
+    interpolate_byte_offset,
     is_complete_speech_result,
     keep_silence_ms_for_rate,
     min_pause_trigger_ms_for_rate,
@@ -149,6 +151,98 @@ def _show_message_box(
         return int(show_message_box(message, caption, style, parent))
     except Exception:
         return language_utils.show_message_box(message, caption, style, parent)
+
+
+class _SyncedIndexDispatcher:
+    """Dispatch PCM chunks and NVDA synthIndexReached callbacks in playback order."""
+
+    def __init__(self, driver: SynthDriver, cancelEvent: threading.Event) -> None:
+        self._driver = driver
+        self._cancelEvent = cancelEvent
+        self._lastFeedState: dict[str, Any] | None = None
+        self._deferredUntilAudio: list[Any] = []
+        self._hasFedAudio: bool = False
+
+    def _can_notify(self) -> bool:
+        return not self._cancelEvent.is_set() and not self._driver._is_shutting_down()
+
+    def _fire_now(self, indexes: list[Any]) -> None:
+        for index in indexes:
+            if not self._can_notify():
+                return
+            synthIndexReached.notify(synth=self._driver, index=index)
+
+    def notify_after_previous_audio(self, indexes: list[Any], *, deferIfEmpty: bool = False) -> None:
+        if not indexes or not self._can_notify():
+            return
+        if self._lastFeedState is None:
+            player = self._driver._current_player()
+            if deferIfEmpty and self._driver._player_feed_supports_on_done(player):
+                self._deferredUntilAudio.extend(indexes)
+                return
+            if self._driver._isPaused:
+                self._driver._sync_player()
+            self._fire_now(indexes)
+            return
+        state = self._lastFeedState
+        notifyImmediately = False
+        with state["lock"]:
+            if state["done"]:
+                notifyImmediately = True
+            else:
+                state["indexes"].extend(indexes)
+        if notifyImmediately:
+            if self._driver._isPaused:
+                self._driver._sync_player()
+            self._fire_now(indexes)
+
+    def feed(self, pcm: bytes, dueIndexes: list[Any] | tuple[Any, ...] = ()) -> None:
+        pending = list(dueIndexes)
+        if not pcm:
+            self.notify_after_previous_audio(pending, deferIfEmpty=not self._hasFedAudio)
+            return
+        self._hasFedAudio = True
+        if self._deferredUntilAudio:
+            pending = self._deferredUntilAudio + pending
+            self._deferredUntilAudio = []
+        if not self._can_notify():
+            return
+        player = self._driver._current_player()
+        if not self._driver._player_feed_supports_on_done(player):
+            self._driver._feed_audio(pcm)
+            if pending:
+                if self._driver._isPaused:
+                    self._driver._sync_player()
+                self._fire_now(pending)
+            return
+
+        state: dict[str, Any] = {
+            "lock": threading.Lock(),
+            "done": False,
+            "indexes": pending,
+        }
+
+        def on_chunk_done() -> None:
+            with state["lock"]:
+                state["done"] = True
+                toNotify = list(state["indexes"])
+                state["indexes"].clear()
+            self._fire_now(toNotify)
+
+        self._lastFeedState = state
+        queued = self._driver._feed_audio(pcm, onDone=on_chunk_done)
+        if not queued:
+            if self._lastFeedState is state:
+                self._lastFeedState = None
+            on_chunk_done()
+
+    def flush_remaining(self, indexes: list[Any]) -> None:
+        if self._deferredUntilAudio:
+            allPending = self._deferredUntilAudio + list(indexes)
+            self._deferredUntilAudio = []
+        else:
+            allPending = list(indexes)
+        self.notify_after_previous_audio(allPending, deferIfEmpty=False)
 
 
 class SynthDriver(synthDriverHandler.SynthDriver):
@@ -334,6 +428,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         self._consecutiveRuntimeErrors = 0
         self._cacheLock = threading.RLock()
         self._shortAudioCache: OrderedDict[tuple[Any, ...], bytes] = OrderedDict()
+        self._shortAudioTimepointsCache: dict[tuple[Any, ...], tuple[tuple[int, int], ...]] = {}
         self._shortAudioCacheBytes = 0
         self._shortAudioCacheHits = 0
         self._shortAudioCacheMisses = 0
@@ -1436,7 +1531,13 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 )
                 if not cancelEvent.is_set():
                     if hasInternalIndexes:
-                        self._feed_audio_with_indexes(cached, remainingIndexes, len(originalText), cancelEvent)
+                        self._feed_audio_with_indexes(
+                            cached,
+                            remainingIndexes,
+                            len(originalText),
+                            cancelEvent,
+                            checkpoints=self._get_cached_timepoints(cacheKey),
+                        )
                     else:
                         self._feed_audio(cached)
                         for index, _charOffset in remainingIndexes:
@@ -1585,19 +1686,45 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         deferredMarkOffset = -1
         boundarySegmentIndex = 0
         completedSegmentChars = 0
+        dispatcher = _SyncedIndexDispatcher(self, cancelEvent)
+        rawSamplesReceived = 0
+        postShortenBytesFed = 0
+        scheduledSampleIndexes: list[tuple[int, int, Any]] = []
+        markTieSeq = 0
+        pendingCheckpoints: list[tuple[int, int]] = []
+        timepointCheckpoints: list[tuple[int, int]] = []
         eventQueue: queue.SimpleQueue[tuple[str, Any]] = queue.SimpleQueue()
         consumerErrors: list[BaseException] = []
 
+        def record_checkpoint(cpChar: int, cpByte: int) -> None:
+            if cacheKey is None or cpChar < 0:
+                return
+            if timepointCheckpoints and timepointCheckpoints[-1][0] == cpChar:
+                return
+            timepointCheckpoints.append((cpChar, cpByte))
+
+        def advance_checkpoints_up_to(sampleLimit: int) -> None:
+            while pendingCheckpoints and pendingCheckpoints[0][0] <= sampleLimit:
+                _cpSample, cpChar = pendingCheckpoints.pop(0)
+                record_checkpoint(cpChar, postShortenBytesFed)
+
         def notify_indexes_through(charOffset: int, *, sync: bool = False) -> None:
             nonlocal pendingIndexes
+            due: list[Any] = []
             while pendingIndexes and pendingIndexes[0][1] <= charOffset:
                 index, _indexOffset = pendingIndexes.pop(0)
-                if cancelEvent.is_set():
-                    return
-                if sync or self._isPaused:
+                due.append(index)
+            if not due or cancelEvent.is_set():
+                return
+            if sync:
+                if self._isPaused:
                     self._sync_player()
-                if not cancelEvent.is_set():
-                    synthIndexReached.notify(synth=self, index=index)
+                dispatcher._fire_now(due)
+            else:
+                dispatcher.notify_after_previous_audio(
+                    due,
+                    deferIfEmpty=not dispatcher._hasFedAudio,
+                )
 
         def on_mark_impl(charOffset: int) -> None:
             nonlocal deferredMarkOffset
@@ -1609,21 +1736,117 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 return
             notify_indexes_through(clampedOffset)
 
-        def feed_processed_audio(pcm: bytes) -> None:
-            nonlocal deferredMarkOffset
-            if not pcm:
+        def feed_processed_audio(pcm: bytes, dueIndexes: Sequence[Any] = ()) -> None:
+            nonlocal deferredMarkOffset, postShortenBytesFed
+            if pcm:
+                if cacheKey is not None:
+                    audioParts.append(pcm)
+                if collectSegmentAudio:
+                    segmentAudioParts.append(pcm)
+                postShortenBytesFed += len(pcm)
+            if cancelEvent.is_set():
                 return
+            if leadBuffer is not None:
+                livePcm = leadBuffer.feed(pcm) if pcm else b""
+                if livePcm:
+                    dispatcher.feed(livePcm, dueIndexes)
+                elif dueIndexes:
+                    dispatcher.notify_after_previous_audio(
+                        list(dueIndexes),
+                        deferIfEmpty=not dispatcher._hasFedAudio,
+                    )
+            elif pcm:
+                dispatcher.feed(pcm, dueIndexes)
+            elif dueIndexes:
+                dispatcher.notify_after_previous_audio(
+                    list(dueIndexes),
+                    deferIfEmpty=not dispatcher._hasFedAudio,
+                )
+            if pcm and deferredMarkOffset >= 0 and not self._isPaused:
+                flushedOffset = deferredMarkOffset
+                deferredMarkOffset = -1
+                notify_indexes_through(flushedOffset)
+
+        def push_raw_pcm(rawChunk: bytes, dueIndexes: Sequence[Any] = ()) -> None:
+            processed = silenceShortener.feed(rawChunk) if silenceShortener is not None else rawChunk
+            if processed or dueIndexes:
+                feed_processed_audio(processed, dueIndexes)
+
+        def handle_audio_chunk(payload: bytes) -> None:
+            nonlocal rawSamplesReceived
+            payloadLen = len(payload) - (len(payload) % 2)
+            if payloadLen <= 0:
+                return
+            chunkStart = rawSamplesReceived
+            chunkSamples = payloadLen // 2
+            chunkEnd = chunkStart + chunkSamples
+            rawSamplesReceived = chunkEnd
+
+            hasDueIndex = bool(scheduledSampleIndexes and scheduledSampleIndexes[0][0] <= chunkEnd)
+            hasDueCheckpoint = bool(pendingCheckpoints and pendingCheckpoints[0][0] <= chunkEnd)
+            if not hasDueIndex and not hasDueCheckpoint:
+                push_raw_pcm(payload[:payloadLen])
+                return
+
+            offsetInChunkBytes = 0
+            while True:
+                nextIdxSample = (
+                    scheduledSampleIndexes[0][0]
+                    if scheduledSampleIndexes and scheduledSampleIndexes[0][0] <= chunkEnd
+                    else None
+                )
+                nextCpSample = (
+                    pendingCheckpoints[0][0] if pendingCheckpoints and pendingCheckpoints[0][0] <= chunkEnd else None
+                )
+                if nextIdxSample is None and nextCpSample is None:
+                    break
+                if nextIdxSample is not None and nextCpSample is not None:
+                    boundarySample = min(nextIdxSample, nextCpSample)
+                else:
+                    boundarySample = nextIdxSample if nextIdxSample is not None else nextCpSample  # type: ignore[assignment]
+                splitSample = max(chunkStart, min(chunkEnd, boundarySample))
+                splitByte = (splitSample - chunkStart) * 2
+                subPayload = payload[offsetInChunkBytes:splitByte]
+                offsetInChunkBytes = splitByte
+                processed = (
+                    silenceShortener.feed(subPayload) if (silenceShortener is not None and subPayload) else subPayload
+                )
+                dueIndexes: list[Any] = []
+                while scheduledSampleIndexes and scheduledSampleIndexes[0][0] <= boundarySample:
+                    _target, _seq, index = scheduledSampleIndexes.pop(0)
+                    dueIndexes.append(index)
+                feed_processed_audio(processed, dueIndexes)
+                advance_checkpoints_up_to(boundarySample)
+            if offsetInChunkBytes < payloadLen:
+                push_raw_pcm(payload[offsetInChunkBytes:payloadLen])
+
+        def handle_mark_event(charOffset: int, sampleOffset: int | None) -> None:
+            nonlocal markTieSeq
+            if sampleOffset is None:
+                on_mark_impl(charOffset)
+                return
+            if cancelEvent.is_set():
+                return
+            clampedOffset = max(0, min(len(text), charOffset))
+            clampedSample = max(0, int(sampleOffset))
             if cacheKey is not None:
-                audioParts.append(pcm)
-            if collectSegmentAudio:
-                segmentAudioParts.append(pcm)
-            if not cancelEvent.is_set():
-                livePcm = leadBuffer.feed(pcm) if leadBuffer is not None else pcm
-                self._feed_audio(livePcm)
-                if deferredMarkOffset >= 0 and not self._isPaused:
-                    flushedOffset = deferredMarkOffset
-                    deferredMarkOffset = -1
-                    notify_indexes_through(flushedOffset)
+                if clampedSample <= rawSamplesReceived:
+                    record_checkpoint(clampedOffset, postShortenBytesFed)
+                else:
+                    bisect.insort(pendingCheckpoints, (clampedSample, clampedOffset))
+            readyNow: list[Any] = []
+            while pendingIndexes and pendingIndexes[0][1] <= clampedOffset:
+                index, _indexOffset = pendingIndexes.pop(0)
+                if clampedSample <= rawSamplesReceived:
+                    readyNow.append(index)
+                else:
+                    markTieSeq += 1
+                    bisect.insort(scheduledSampleIndexes, (clampedSample, markTieSeq, index))
+            if readyNow:
+                dispatcher.notify_after_previous_audio(
+                    readyNow,
+                    deferIfEmpty=not dispatcher._hasFedAudio,
+                )
 
         def on_segment_end_impl() -> None:
             nonlocal boundarySegmentIndex, completedSegmentChars
@@ -1655,12 +1878,13 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                     if kind == "audio":
                         if cancelEvent.is_set() or self._is_shutting_down():
                             continue
-                        if silenceShortener is not None:
-                            feed_processed_audio(silenceShortener.feed(payload))
-                        else:
-                            feed_processed_audio(payload)
+                        handle_audio_chunk(payload)
                     elif kind == "mark":
-                        on_mark_impl(payload)
+                        if isinstance(payload, tuple):
+                            charOffset, sampleOffset = payload
+                        else:
+                            charOffset, sampleOffset = payload, None
+                        handle_mark_event(charOffset, sampleOffset)
                     elif kind == "segmentEnd":
                         if not cancelEvent.is_set() and not self._is_shutting_down():
                             on_segment_end_impl()
@@ -1674,7 +1898,12 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                             completedSegmentAudio.append(b"".join(segmentAudioParts))
                             segmentAudioParts.clear()
                         if leadBuffer is not None and not cancelEvent.is_set():
-                            self._feed_audio(leadBuffer.finish())
+                            dispatcher.feed(leadBuffer.finish())
+                        if not cancelEvent.is_set():
+                            advance_checkpoints_up_to(rawSamplesReceived + 10**9)
+                            remainingScheduled = [index for _s, _seq, index in scheduledSampleIndexes]
+                            scheduledSampleIndexes.clear()
+                            dispatcher.flush_remaining(remainingScheduled)
                     elif kind == "done":
                         break
             except BaseException as exc:
@@ -1685,9 +1914,9 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             if not cancelEvent.is_set() and not self._is_shutting_down():
                 eventQueue.put(("audio", pcm))
 
-        def on_mark(charOffset: int) -> None:
+        def on_mark(charOffset: int, sampleOffset: int | None = None) -> None:
             if not cancelEvent.is_set() and not self._is_shutting_down():
-                eventQueue.put(("mark", charOffset))
+                eventQueue.put(("mark", (charOffset, sampleOffset)))
 
         def on_segment_end() -> None:
             # Never block the shared CDP reader thread on WavePlayer real-time drain;
@@ -1734,14 +1963,12 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         if deferredMarkOffset >= 0 and not cancelEvent.is_set():
             notify_indexes_through(deferredMarkOffset, sync=self._isPaused)
             deferredMarkOffset = -1
+        if scheduledSampleIndexes and not cancelEvent.is_set():
+            dispatcher.flush_remaining([index for _s, _seq, index in scheduledSampleIndexes])
+            scheduledSampleIndexes.clear()
         if pendingIndexes and not cancelEvent.is_set():
-            for index, _charOffset in pendingIndexes:
-                if cancelEvent.is_set():
-                    return
-                if self._isPaused:
-                    self._sync_player()
-                if not cancelEvent.is_set():
-                    synthIndexReached.notify(synth=self, index=index)
+            dispatcher.flush_remaining([index for index, _charOffset in pendingIndexes])
+            pendingIndexes.clear()
         expectedSegmentEnds = max(0, len(synthesisSegments) - 1)
         speechComplete = not cancelEvent.is_set() and is_complete_speech_result(
             speechResult,
@@ -1786,7 +2013,11 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             and len(audio) >= 64
             and _pcm_has_audible_sample(audio)
         ):
-            self._put_cached_audio(cacheKey, audio)
+            self._put_cached_audio(
+                cacheKey,
+                audio,
+                checkpoints=tuple(timepointCheckpoints) if timepointCheckpoints else None,
+            )
             log.debug(
                 "Google TTS short audio cache stored: kind=group, chars=%d, bytes=%d.",
                 len(originalText),
@@ -1797,18 +2028,41 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         cancelEvent = getattr(self, "_activeCancelEvent", None)
         return cancelEvent is not None and cancelEvent.is_set()
 
+    @staticmethod
+    def _player_feed_supports_on_done(player: Any) -> bool:
+        if player is None:
+            return False
+        feed = getattr(player, "feed", None)
+        if not callable(feed):
+            return False
+        try:
+            params = inspect.signature(feed).parameters
+        except (TypeError, ValueError):
+            return False
+        if "onDone" in params:
+            return True
+        return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())
+
     def _write_pcm_to_player(
         self,
         pcm: bytes,
         *,
         preparePlayer: Callable[[Any], None] | None = None,
         isSilence: bool = False,
-    ) -> None:
+        onDone: Callable[[], None] | None = None,
+    ) -> bool:
         if not pcm or self._is_shutting_down() or self._active_cancel_set():
-            return
+            return False
+
+        def call_feed(targetPlayer: Any) -> None:
+            if onDone is not None and self._player_feed_supports_on_done(targetPlayer):
+                targetPlayer.feed(pcm, onDone=onDone)
+            else:
+                targetPlayer.feed(pcm)
+
         with self._player_feed_lock():
             if self._is_shutting_down() or self._active_cancel_set():
-                return
+                return False
             self._audioChunksSinceDeviceCheck += 1
             if self._audioChunksSinceDeviceCheck >= 50:
                 self._ensure_current_output_device()
@@ -1818,14 +2072,15 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 self._audioChunksSinceDeviceCheck = 0
             player = self._current_player()
             if player is None or self._is_shutting_down() or self._active_cancel_set():
-                return
+                return False
             if preparePlayer is not None:
                 preparePlayer(player)
             try:
-                player.feed(pcm)
+                call_feed(player)
+                return True
             except Exception:
                 if self._is_shutting_down() or self._active_cancel_set():
-                    return
+                    return False
                 label = (
                     "WavePlayer.feed failed during silence; recreating WavePlayer and retrying."
                     if isSilence
@@ -1834,13 +2089,14 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 log.debug(label, exc_info=True)
                 self._recreate_wave_player()
                 if self._is_shutting_down() or self._active_cancel_set():
-                    return
+                    return False
                 retryPlayer = self._current_player()
                 if retryPlayer is not None:
                     if preparePlayer is not None:
                         preparePlayer(retryPlayer)
                     try:
-                        retryPlayer.feed(pcm)
+                        call_feed(retryPlayer)
+                        return True
                     except Exception:
                         log.debug(
                             "WavePlayer.feed retry failed during silence."
@@ -1848,9 +2104,10 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                             else "WavePlayer.feed retry failed.",
                             exc_info=True,
                         )
+            return False
 
-    def _feed_audio(self, pcm: bytes) -> None:
-        self._write_pcm_to_player(pcm, isSilence=False)
+    def _feed_audio(self, pcm: bytes, *, onDone: Callable[[], None] | None = None) -> bool:
+        return self._write_pcm_to_player(pcm, isSilence=False, onDone=onDone)
 
     def _feed_audio_with_indexes(
         self,
@@ -1858,40 +2115,33 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         indexes: list[_IndexMarker],
         totalCharacters: int,
         cancelEvent: threading.Event,
+        checkpoints: tuple[tuple[int, int], ...] | None = None,
     ) -> None:
         if not indexes:
             self._feed_audio(pcm)
             return
+        dispatcher = _SyncedIndexDispatcher(self, cancelEvent)
         if not pcm:
-            for index, _charOffset in indexes:
-                if cancelEvent.is_set():
-                    return
-                if self._isPaused:
-                    self._sync_player()
-                if not cancelEvent.is_set():
-                    synthIndexReached.notify(synth=self, index=index)
+            dispatcher.flush_remaining([index for index, _charOffset in indexes])
             return
         totalBytes = len(pcm)
         totalCharacters = max(1, totalCharacters)
-        byteIndexes: list[tuple[Any, int]] = []
+        groupedOffsets: list[tuple[int, list[Any]]] = []
         for index, charOffset in indexes:
-            clampedOffset = max(0, min(totalCharacters, charOffset))
-            byteOffset = int((clampedOffset / totalCharacters) * totalBytes)
-            byteOffset -= byteOffset % 2
-            byteIndexes.append((index, max(0, min(totalBytes, byteOffset))))
+            byteOffset = interpolate_byte_offset(charOffset, totalCharacters, totalBytes, checkpoints)
+            if groupedOffsets and byteOffset <= groupedOffsets[-1][0]:
+                groupedOffsets[-1][1].append(index)
+            else:
+                groupedOffsets.append((byteOffset, [index]))
         position = 0
-        for index, byteOffset in byteIndexes:
+        for byteOffset, dueIndexes in groupedOffsets:
             if cancelEvent.is_set():
                 return
-            if byteOffset > position:
-                self._feed_audio(pcm[position:byteOffset])
-                position = byteOffset
-            if self._isPaused:
-                self._sync_player()
-            if not cancelEvent.is_set():
-                synthIndexReached.notify(synth=self, index=index)
+            chunk = pcm[position:byteOffset]
+            position = byteOffset
+            dispatcher.feed(chunk, dueIndexes)
         if not cancelEvent.is_set() and position < totalBytes:
-            self._feed_audio(pcm[position:])
+            dispatcher.feed(pcm[position:])
 
     def _drain_player(self, *, preferSync: bool, failureMessage: str) -> None:
         """Flush pending WavePlayer audio under the feeder lock, recreating on error."""
@@ -1988,16 +2238,37 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             self._shortAudioCacheMisses += 1
         return None
 
-    def _put_cached_audio(self, key: tuple[Any, ...], audio: bytes) -> None:
+    def _get_cached_timepoints(self, key: tuple[Any, ...] | None) -> tuple[tuple[int, int], ...] | None:
+        if key is None:
+            return None
+        cacheLock = getattr(self, "_cacheLock", None)
+        tpCache = getattr(self, "_shortAudioTimepointsCache", None)
+        if cacheLock is None or tpCache is None:
+            return None
+        with cacheLock:
+            return tpCache.get(key)
+
+    def _put_cached_audio(
+        self,
+        key: tuple[Any, ...],
+        audio: bytes,
+        *,
+        checkpoints: tuple[tuple[int, int], ...] | None = None,
+    ) -> None:
         if not audio:
             return
         if len(audio) > _SHORT_CACHE_MAX_BYTES:
             return
+        tpCache = getattr(self, "_shortAudioTimepointsCache", None)
         with self._cacheLock:
             oldAudio = self._shortAudioCache.pop(key, None)
             if oldAudio is not None:
                 self._shortAudioCacheBytes -= len(oldAudio)
+            if tpCache is not None:
+                tpCache.pop(key, None)
             self._shortAudioCache[key] = audio
+            if tpCache is not None and checkpoints:
+                tpCache[key] = checkpoints
             self._shortAudioCacheBytes += len(audio)
             self._shortAudioCache.move_to_end(key)
             evictionsBefore = self._shortAudioCacheEvictions
@@ -2005,7 +2276,9 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 len(self._shortAudioCache) > _SHORT_CACHE_MAX_ITEMS
                 or self._shortAudioCacheBytes > _SHORT_CACHE_MAX_BYTES
             ):
-                _, removedAudio = self._shortAudioCache.popitem(last=False)
+                removedKey, removedAudio = self._shortAudioCache.popitem(last=False)
+                if tpCache is not None:
+                    tpCache.pop(removedKey, None)
                 self._shortAudioCacheBytes -= len(removedAudio)
                 self._shortAudioCacheEvictions += 1
             if (
@@ -2026,6 +2299,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         cacheLock = getattr(self, "_cacheLock", None)
         if cacheLock is None:
             return
+        tpCache = getattr(self, "_shortAudioTimepointsCache", None)
         with cacheLock:
             if self._shortAudioCache:
                 log.debug(
@@ -2037,6 +2311,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                     getattr(self, "_shortAudioCacheEvictions", 0),
                 )
             self._shortAudioCache.clear()
+            if tpCache is not None:
+                tpCache.clear()
             self._shortAudioCacheBytes = 0
             self._shortAudioCacheHits = 0
             self._shortAudioCacheMisses = 0
@@ -2177,7 +2453,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
     def _auto_language_notice_message(self) -> str:
         return _(
             "Voice settings are managed by automatic language profiles. "
-            "Open the Google TTS for NVDA category in NVDA Settings to configure them."
+            "Open the Google TTS For NVDA category in NVDA Settings to configure them."
         )
 
     def _get_notice(self) -> str:

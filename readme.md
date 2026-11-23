@@ -4,7 +4,7 @@
 
 For a long time, screen reader users have wished they could use familiar voices from Google's text-to-speech technology on NVDA for Windows, similar to the experience on Android screen readers. Google TTS For NVDA fulfills that wish, delivering responsive, natural speech to enhance daily accessibility. Once your desired voice packages are downloaded, the add-on operates entirely offline on your computer.
 
-*This add-on is co-developed by [Nguyễn Anh Đức](https://github.com/nguyenanhduc09), [Đào Đức Trung](https://github.com/daoductrung) and [Phạm Hùng Vương](https://github.com/phamhungvuong302).*
+*Originally created by [Nguyễn Anh Đức](https://github.com/nguyenanhduc09) and [Đào Đức Trung](https://github.com/daoductrung); now maintained and actively developed by [Phạm Hùng Vương](https://github.com/phamhungvuong302).*
 
 **Independence notice:** Google TTS For NVDA is an independent, open-source accessibility project. It is not affiliated with, sponsored by, or endorsed by Google LLC. Google is a trademark of Google LLC.
 
@@ -36,8 +36,8 @@ For a long time, screen reader users have wished they could use familiar voices 
 
 Latest beta release: **Google TTS For NVDA 1.1**, last updated on **Mm dd, 2027**.
 
-* Full change log for version 1.1: [Google TTS For NVDA 1.1 release notes](https://github.com/nguyenanhduc09/Google-TTS-For-NVDA/releases/tag/v1.1).
-* Download the latest stable package: [googleTtsForNvda-1.1.nvda-addon](https://github.com/nguyenanhduc09/Google-TTS-For-NVDA/releases/download/v1.1/googleTtsForNvda-1.1.nvda-addon).
+* Full change log for version 1.1: [Google TTS For NVDA 1.1 release notes](https://github.com/phamhungvuong302/Google-TTS-For-NVDA/releases/tag/v1.1).
+* Download the latest stable package: [googleTtsForNvda-1.1.nvda-addon](https://github.com/phamhungvuong302/Google-TTS-For-NVDA/releases/download/v1.1/googleTtsForNvda-1.1.nvda-addon).
 
 ---
 
@@ -67,7 +67,7 @@ Latest beta release: **Google TTS For NVDA 1.1**, last updated on **Mm dd, 2027*
 
 You can install Google TTS For NVDA in one of these ways:
 
-1. **Direct download:** Download the latest `.nvda-addon` file from the [Releases](https://github.com/nguyenanhduc09/Google-TTS-For-NVDA/releases) page. While NVDA is running, open the downloaded file directly from File Explorer and follow the prompts.
+1. **Direct download:** Download the latest `.nvda-addon` file from the [Releases](https://github.com/phamhungvuong302/Google-TTS-For-NVDA/releases) page. While NVDA is running, open the downloaded file directly from File Explorer and follow the prompts.
 2. **NVDA Add-on Store (External source):** In NVDA, open **NVDA Menu -> Tools -> Add-on Store**, choose **Install from external source**, select the downloaded `.nvda-addon` file, and confirm.
 3. **NVDA Add-on Store (Direct):** In NVDA, open **NVDA Menu -> Tools -> Add-on Store**, search for **Google TTS For NVDA** in the **Available add-ons** tab, press <kbd>Enter</kbd>, choose **Install**, and restart NVDA when prompted.
 
@@ -76,7 +76,7 @@ You can install Google TTS For NVDA in one of these ways:
 1. Open NVDA's **Select Synthesizer** dialog by pressing <kbd>NVDA+Ctrl+S</kbd> and choose **Google TTS For NVDA**.
 2. If no voice packages are installed, NVDA will display a message indicating that no Google TTS For NVDA voices are installed. Press **OK** to open Google TTS Voice Manager and download a voice package. Press **Cancel** to keep using your current synthesizer for now.
 3. In Google TTS Voice Manager, download at least one voice package from the **Download** tab.
-4. Once downloaded, open **Speech settings** (<kbd>NVDA+Ctrl+V</kbd>) to select your preferred language and variant.
+4. Once downloaded, open **Speech Settings** (<kbd>NVDA+Ctrl+V</kbd>) to select your preferred language and variant.
 
 ---
 
@@ -106,12 +106,12 @@ On each tab, the controls appear in this order: **Filter by language**, **Check 
 
 ### Speech Settings
 
-NVDA's Speech settings dialog (<kbd>NVDA+Ctrl+V</kbd>) provides **Pauses** for Google TTS For NVDA whether automatic language profiles are on or off. When automatic language profiles are off, the dialog also provides:
+NVDA's Speech Settings dialog (<kbd>NVDA+Ctrl+V</kbd>) provides **Pauses** for Google TTS For NVDA whether automatic language profiles are on or off. When automatic language profiles are off, the dialog also provides:
 
 * **Voice:** Choose the installed Google TTS language.
 * **Variant:** Choose the voice name within that language, including Chrome OS and Google Natural voices when installed.
 * **Rate:** Adjust the reading speed. Non-SeaNet packages use the Chromium browser runtime rate path; SeaNet packages may use post-synthesis artificial rate processing at higher speeds.
-* **Rate Boost:** Enable to double the computed speech rate for fast reading. High-speed SeaNet speech may use more CPU because the add-on processes generated audio after synthesis.
+* **Rate boost:** Enable to double the computed speech rate for fast reading. High-speed SeaNet speech may use more CPU because the add-on processes generated audio after synthesis.
 * **Pitch:** Adjust the pitch of the voice.
 * **Volume:** Adjust the speech volume.
 * **Pauses:** Choose whether pauses stay unchanged, are shortened only at the end of text, or are shortened throughout speech for faster reading. This setting was inspired by the [IBMTTS driver for NVDA](https://github.com/davidacm/NVDA-IBMTTS-Driver) and applies to all Google TTS speech.
@@ -175,7 +175,7 @@ When **Use automatic language profiles** is enabled, the add-on dynamically appl
 
 1. Open **NVDA Menu -> Preferences -> Settings -> Google TTS For NVDA**.
 2. Check **Use automatic language profiles**.
-3. Move to **Preferred profile language** and select your primary language fallback. Only enabled languages appear in this list, so it may be empty until you enable a profile
+3. Move to **Preferred profile language** and select your primary language fallback. Only enabled languages appear in this list, so it may be empty until you enable a profile.
 4. Choose an **Automatic language profile** from the list.
 5. Check **Use this language profile** for each language you wish to activate.
 6. Configure **Variant**, **Rate**, **Rate boost**, **Pitch**, **Volume**, capital-letter handling, and spelling behavior for that language.
@@ -185,7 +185,7 @@ When **Use automatic language profiles** is enabled, the add-on dynamically appl
 Rate, pitch, and volume use slider controls like NVDA's Speech Settings. Capital-letter pitch uses a numeric edit/spin control so you can adjust it precisely.
 
 > [!NOTE]
-> While automatic language profiles are enabled, NVDA's Speech settings dialog (<kbd>NVDA+Ctrl+V</kbd>) and the synth settings ring (<kbd>NVDA+Ctrl+Shift+Arrow keys</kbd>) display a focusable notice directing you to configure voice parameters in the add-on settings category. This keeps per-language profile values protected from accidental overwrites. **Pauses** remains available in Speech settings and applies to all Google TTS speech. When automatic language profiles are turned off, normal Speech Settings controls and values immediately return.
+> While automatic language profiles are enabled, NVDA's Speech Settings dialog (<kbd>NVDA+Ctrl+V</kbd>) and the synth settings ring (<kbd>NVDA+Ctrl+Arrow keys</kbd> on desktop keyboards or <kbd>NVDA+Shift+Ctrl+Arrow keys</kbd> on laptop keyboards) display a focusable notice directing you to configure voice parameters in the add-on settings category. This keeps per-language profile values protected from accidental overwrites. **Pauses** remains available in Speech Settings and applies to all Google TTS speech. When automatic language profiles are turned off, normal Speech Settings controls and values immediately return.
 
 ---
 
@@ -270,7 +270,7 @@ Do not rely on it there. Google TTS For NVDA requires an interactive Windows use
 
 To package the add-on yourself:
 
-1. Clone this repository: `git clone https://github.com/nguyenanhduc09/Google-TTS-For-NVDA.git`
+1. Clone this repository: `git clone https://github.com/phamhungvuong302/Google-TTS-For-NVDA.git`
 2. Ensure **Python** and **Node.js** are installed on your computer.
 3. Run the automated build script:
 
@@ -290,8 +290,11 @@ We value pull requests from the community. A contribution can be accepted when t
 
 ## Support & Contact
 
-If you have questions, feedback, or need assistance, feel free to contact the development team:
+If you have questions or feedback, or need assistance, please contact the current maintainer:
 
-* **[Nguyen Anh Duc](https://github.com/nguyenanhduc09):** [ducna1803@gmail.com](mailto:ducna1803@gmail.com) | Telegram: [t.me/anhduc1803](https://t.me/anhduc1803)
-* **[Dao Duc Trung](https://github.com/daoductrung):** [trung@ddt.one](mailto:trung@ddt.one) | Telegram: [t.me/Daoductrung](https://t.me/Daoductrung)
-* **[Pham Hung Vuong](https://github.com/phamhungvuong302):** [hungvuong106206@gmail.com](mailto:hungvuong106206@gmail.com) | Telegram: [t.me/phamhungvuong302](https://t.me/phamhungvuong302)
+* **Phạm Hùng Vương** *(Maintainer & Lead Developer)*: [hungvuong106206@gmail.com](mailto:hungvuong106206@gmail.com) | Telegram: [t.me/phamhungvuong302](https://t.me/phamhungvuong302)
+
+Original co-authors (no longer active developers):
+
+* **Nguyễn Anh Đức**: [ducna1803@gmail.com](mailto:ducna1803@gmail.com) | Telegram: [t.me/anhduc1803](https://t.me/anhduc1803)
+* **Đào Đức Trung**: [trung@ddt.one](mailto:trung@ddt.one) | Telegram: [t.me/Daoductrung](https://t.me/Daoductrung)

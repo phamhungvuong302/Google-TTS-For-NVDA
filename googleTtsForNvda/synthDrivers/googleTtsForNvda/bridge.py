@@ -5,6 +5,7 @@ import binascii
 import functools
 import http.client
 import http.server
+import inspect
 import json
 import os
 import shutil
@@ -178,8 +179,24 @@ class CdpCancelled(Exception):
 
 
 AudioCallback = Callable[[bytes], None]
-MarkCallback = Callable[[int], None]
+MarkCallback = Callable[..., None]
 SegmentEndCallback = Callable[[], None]
+
+
+def _mark_callback_accepts_sample_offset(callback: MarkCallback | None) -> bool:
+    if callback is None:
+        return False
+    try:
+        params = list(inspect.signature(callback).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    positional = 0
+    for param in params:
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            return True
+        if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+            positional += 1
+    return positional >= 2
 
 
 class _ThreadingTcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -1995,7 +2012,9 @@ class WasmTtsEngineBridge:
             "postPitch": options.get("postPitch", 1),
             "volume": options["volume"],
             "outputGain": options.get("outputGain", options["volume"]),
+            "emitMarks": onMark is not None,
         }
+        markAcceptsSampleOffset = _mark_callback_accepts_sample_offset(onMark)
         if segments:
             payload["segments"] = segments
         if hasPreviousSegment:
@@ -2084,7 +2103,17 @@ class WasmTtsEngineBridge:
             elif eventType == "mark":
                 if onMark is not None:
                     with suppress(TypeError, ValueError):
-                        onMark(max(0, int(event.get("charIndex") or 0)))
+                        charIndex = max(0, int(event.get("charIndex") or 0))
+                        if markAcceptsSampleOffset:
+                            rawSampleOffset = event.get("sampleOffset")
+                            sampleOffset = (
+                                None
+                                if rawSampleOffset is None or isinstance(rawSampleOffset, bool)
+                                else max(0, int(rawSampleOffset))
+                            )
+                            onMark(charIndex, sampleOffset)
+                        else:
+                            onMark(charIndex)
             elif eventType == "segmentEnd":
                 state["segmentEnds"] += 1
                 lastSegmentEndAt = time.perf_counter()

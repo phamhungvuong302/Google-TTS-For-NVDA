@@ -246,6 +246,47 @@ def align_pcm_bytes(byteCount: int, bytesPerSample: int = PCM_BYTES_PER_SAMPLE) 
     return max(0, int(byteCount) - (int(byteCount) % bytesPerSample))
 
 
+def interpolate_byte_offset(
+    charOffset: int,
+    totalCharacters: int,
+    totalBytes: int,
+    checkpoints: Sequence[tuple[int, int]] | None = None,
+    *,
+    bytesPerSample: int = PCM_BYTES_PER_SAMPLE,
+) -> int:
+    """Map a character offset to an aligned PCM byte offset using word checkpoints when available."""
+    if totalBytes <= 0 or totalCharacters <= 0:
+        return 0
+    clampedChar = max(0, min(totalCharacters, int(charOffset)))
+    if clampedChar <= 0:
+        return 0
+    if clampedChar >= totalCharacters:
+        return align_pcm_bytes(totalBytes, bytesPerSample)
+    if checkpoints:
+        prevChar = 0
+        prevByte = 0
+        for rawChar, rawByte in checkpoints:
+            cpChar = max(prevChar, min(totalCharacters, int(rawChar)))
+            cpByte = max(prevByte, min(totalBytes, align_pcm_bytes(int(rawByte), bytesPerSample)))
+            if cpChar >= clampedChar:
+                spanChars = cpChar - prevChar
+                if spanChars <= 0:
+                    return cpByte
+                ratio = (clampedChar - prevChar) / spanChars
+                mappedByte = prevByte + int(ratio * (cpByte - prevByte))
+                return max(0, min(totalBytes, align_pcm_bytes(mappedByte, bytesPerSample)))
+            prevChar = cpChar
+            prevByte = cpByte
+        spanChars = totalCharacters - prevChar
+        if spanChars <= 0:
+            return align_pcm_bytes(prevByte, bytesPerSample)
+        ratio = (clampedChar - prevChar) / spanChars
+        mappedByte = prevByte + int(ratio * (totalBytes - prevByte))
+        return max(0, min(totalBytes, align_pcm_bytes(mappedByte, bytesPerSample)))
+    mappedByte = int((clampedChar / max(1, totalCharacters)) * totalBytes)
+    return max(0, min(totalBytes, align_pcm_bytes(mappedByte, bytesPerSample)))
+
+
 def pcm_has_audible_sample(
     pcm: bytes,
     *,

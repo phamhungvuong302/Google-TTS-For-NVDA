@@ -2013,7 +2013,7 @@ _DOC_MARKDOWN_EXTENSIONS: tuple[str, ...] = (
 
 _DOC_MARKDOWN_EXTENSIONS_CONFIG: dict[str, dict[str, object]] = {
     "mdx_gh_links": {
-        "user": "nguyenanhduc09",
+        "user": "phamhungvuong302",
         "repo": "Google-TTS-For-NVDA",
     },
     "pymdownx.superfences": {

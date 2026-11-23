@@ -89,7 +89,7 @@ msgid ""
 "A file system error occurred while managing voice packages. Check the voice "
 "packages folder and try again."
 msgstr ""
-"Se produjo un error del sistema de archivos al gestionar los paquetes de "
+"Se produjo un error en el sistema de archivos al gestionar los paquetes de "
 "voz. Comprueba la carpeta de paquetes de voz e inténtalo de nuevo."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1361
@@ -1238,7 +1238,7 @@ msgid ""
 "NVDA, or close any leftover supported Chromium browser helper processes."
 msgstr ""
 "El perfil del navegador que utiliza Google TTS Para NVDA ya está en uso. "
-"Reinicia NVDA o cierra los procesos auxiliares restantes de navegadores "
+"Reinicia NVDA o cierra los procesos auxiliares residuales de navegadores "
 "Chromium compatibles."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1028
@@ -1278,14 +1278,14 @@ msgstr ""
 #: synthDrivers/googleTtsForNvda/bridge.py:1559
 msgid "The Chromium browser runtime reported an error while preparing speech."
 msgstr ""
-"El entorno de ejecución del navegador Chromium informó de un error mientras "
-"preparaba la síntesis de voz."
+"El entorno de ejecución del navegador Chromium informó de un error al "
+"preparar la síntesis de voz."
 
 #: synthDrivers/googleTtsForNvda/bridge.py:1553
 msgid "The Chromium browser runtime reported an error while processing speech."
 msgstr ""
-"El entorno de ejecución del navegador Chromium informó de un error mientras "
-"procesaba la síntesis de voz."
+"El entorno de ejecución del navegador Chromium informó de un error al "
+"procesar la síntesis de voz."
 
 #: globalPlugins/googleTtsForNvda/settings.py:161
 msgid ""
@@ -1494,7 +1494,7 @@ msgstr ""
 #: synthDrivers/googleTtsForNvda/__init__.py:1565
 msgid ""
 "Voice settings are managed by automatic language profiles. Open the Google "
-"TTS for NVDA category in NVDA Settings to configure them."
+"TTS For NVDA category in NVDA Settings to configure them."
 msgstr ""
 "Las opciones de voz se gestionan mediante perfiles de idioma automáticos. "
 "Abre la categoría Google TTS Para NVDA en Opciones de NVDA para "
@@ -1565,7 +1565,7 @@ msgstr ""
 "Paquetes que se eliminarán, incluidos los paquetes dependientes: {packages}\n"
 "\n"
 "Elige Sí para abrir Seleccionar Sintetizador y cambiar primero. Elige No "
-"para conservar instalado este paquete."
+"para conservar este paquete instalado."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:472
 msgid ""

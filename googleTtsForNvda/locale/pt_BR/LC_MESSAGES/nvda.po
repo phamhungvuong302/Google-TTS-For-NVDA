@@ -1228,7 +1228,7 @@ msgid "Voice package {package} did not pass verification after import."
 msgstr "O pacote de voz {package} não passou na verificação após a importação."
 
 #: synthDrivers/googleTtsForNvda/__init__.py:1797
-msgid "Voice settings are managed by automatic language profiles. Open the Google TTS for NVDA category in NVDA Settings to configure them."
+msgid "Voice settings are managed by automatic language profiles. Open the Google TTS For NVDA category in NVDA Settings to configure them."
 msgstr "As configurações de voz são gerenciadas pelos perfis de idioma automáticos. Abra a categoria Google TTS Para NVDA nas Configurações do NVDA para configurá-las."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:391

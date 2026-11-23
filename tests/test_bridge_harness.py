@@ -53,7 +53,7 @@ function createHarnessContext(extraGlobals = {}) {
 }
 
 function emitEndEvent(ctx, engine, eventPayload = { type: "end" }) {
-    engine.I = false;
+    engine.M = false;
     ctx.chrome.runtime.sendMessage({
         type: "offscreenTtsEventResponse",
         event: eventPayload,
@@ -76,8 +76,8 @@ function createFakeEngine(ctx, opts = {}) {
     const delayMs = opts.delayMs === undefined ? 5 : opts.delayMs;
     const customOnSpeak = opts.onSpeak;
     const engine = {
-        C: { audioWorklet: {} },
-        I: Boolean(opts.initialBusy),
+        j: { audioWorklet: {} },
+        M: Boolean(opts.initialBusy),
         o: workletNode,
         init: opts.init || (async () => {
             if (!engine.o) {
@@ -88,8 +88,8 @@ function createFakeEngine(ctx, opts = {}) {
         onStop: opts.onStop || (async () => undefined),
         onSpeak: customOnSpeak
             ? (...args) => customOnSpeak(...args, engine, workletNode)
-            : (async () => {
-                engine.I = true;
+            : (async (_text, _options, utteranceId) => {
+                engine.M = true;
                 setTimeout(() => {
                     if (sampleLength > 0 && engine.o) {
                         engine.o.port.postMessage({
@@ -98,9 +98,12 @@ function createFakeEngine(ctx, opts = {}) {
                         });
                     }
                     if (opts.skipEndEvent) {
-                        engine.I = false;
+                        engine.M = false;
                     } else {
-                        emitEndEvent(ctx, engine, opts.eventPayload);
+                        const eventPayload = opts.eventPayload
+                            ? (utteranceId == null ? opts.eventPayload : { utteranceId, ...opts.eventPayload })
+                            : (utteranceId == null ? { type: "end" } : { type: "end", utteranceId });
+                        emitEndEvent(ctx, engine, eventPayload);
                     }
                 }, delayMs);
             }),
@@ -108,7 +111,7 @@ function createFakeEngine(ctx, opts = {}) {
     if (opts.extraProps) {
         Object.assign(engine, opts.extraProps);
     }
-    ctx.Yh = engine;
+    ctx.di = engine;
     return engine;
 }
 
@@ -156,13 +159,13 @@ def _run_harness_js(scriptBody: str, *, timeout: float = 10.0) -> Any:
 class BridgeHarnessRuntimeTests(unittest.TestCase):
     """Execute bridgeHarness.js directly in Node vm contexts."""
 
-    def test_get_tts_engine_discovers_yh_key_and_caches_instance(self) -> None:
+    def test_get_tts_engine_discovers_di_key_and_caches_instance(self) -> None:
         result = _run_harness_js(
             """
             const ctx = createHarnessContext();
             createFakeEngine(ctx, { noWorkletNode: true, onSpeak: async () => undefined });
             const readyFirst = ctx.googleTtsForNvdaReady();
-            delete ctx.Yh;
+            delete ctx.di;
             const readyCached = ctx.googleTtsForNvdaReady();
             return { readyFirst, readyCached };
             """
@@ -244,13 +247,13 @@ class BridgeHarnessRuntimeTests(unittest.TestCase):
                     // offscreen_compiled.js triggers clearBuffers during onStop after stopped=true.
                     workletNode.port.postMessage({ command: "clearBuffers" });
                 },
-                onSpeak: async (_t, _o, engine) => {
+                onSpeak: async (_t, _o, _u, engine) => {
                     workletNode.port.postMessage({
                         command: "addBuffer",
                         buffer: new Float32Array(32).fill(0.1),
                     });
                     await ctx.googleTtsForNvdaStop();
-                    engine.I = false;
+                    engine.M = false;
                 },
             });
             const speakRes = await speakWithDefaults(ctx, { sessionId: "s-stop", text: "hello" });
@@ -266,11 +269,11 @@ class BridgeHarnessRuntimeTests(unittest.TestCase):
             """
             const ctx = createHarnessContext();
             createFakeEngine(ctx, {
-                extraProps: { J: null, K: 0 },
-                onSpeak: async (_t, _o, engine, workletNode) => {
-                    // Matches offscreen_compiled.js Ah(): resolves immediately before setTimeout starts synthesis.
+                extraProps: { v: null, A: 0 },
+                onSpeak: async (_t, _o, _u, engine, workletNode) => {
+                    // Matches offscreen_compiled.js Fh(): resolves immediately before setTimeout starts synthesis.
                     setTimeout(() => {
-                        engine.I = true;
+                        engine.M = true;
                         setTimeout(() => {
                             workletNode.port.postMessage({
                                 command: "addBuffer",
@@ -278,9 +281,9 @@ class BridgeHarnessRuntimeTests(unittest.TestCase):
                             });
                             const tail = new ctx.Float32Array(128);
                             tail.fill(0.3, 0, 40);
-                            engine.J = tail;
-                            engine.K = 40;
-                            engine.I = false;
+                            engine.v = tail;
+                            engine.A = 40;
+                            engine.M = false;
                         }, 10);
                     }, 5);
                 },
@@ -303,8 +306,8 @@ class BridgeHarnessRuntimeTests(unittest.TestCase):
             let releaseInstall;
             let callCount = 0;
             const engine = {
-                C: { audioWorklet: {} },
-                I: false,
+                j: { audioWorklet: {} },
+                M: false,
                 o: null,
                 init: async () => {
                     engine.o = new ctx.AudioWorkletNode();
@@ -319,22 +322,22 @@ class BridgeHarnessRuntimeTests(unittest.TestCase):
                     return { status: "installed" };
                 },
                 onStop: async () => undefined,
-                onSpeak: async () => {
-                    engine.I = true;
+                onSpeak: async (_t, _o, utteranceId) => {
+                    engine.M = true;
                     setTimeout(() => {
                         engine.o.port.postMessage({
                             command: "addBuffer",
                             buffer: new Float32Array(64).fill(0.25),
                         });
-                        engine.I = false;
+                        engine.M = false;
                         ctx.chrome.runtime.sendMessage({
                             type: "offscreenTtsEventResponse",
-                            event: { type: "end" },
+                            event: { type: "end", utteranceId },
                         });
                     }, 5);
                 },
             };
-            ctx.Yh = engine;
+            ctx.di = engine;
 
             // 1. Supersede googleTtsForNvdaPreload mid-install with googleTtsForNvdaSpeak
             const preloadPromise = ctx.googleTtsForNvdaPreload({
@@ -483,7 +486,7 @@ class BridgeHarnessRuntimeTests(unittest.TestCase):
             const ctx = createHarnessContext();
             createFakeEngine(ctx, {
                 initialBusy: true,
-                onSpeak: async (_t, _o, engine, workletNode) => {
+                onSpeak: async (_t, _o, _u, engine, workletNode) => {
                     for (let i = 0; i < 6; i++) {
                         const block = new ctx.Float32Array(2400);
                         for (let j = 0; j < block.length; j++) {
@@ -494,7 +497,7 @@ class BridgeHarnessRuntimeTests(unittest.TestCase):
                             buffer: block,
                         });
                     }
-                    engine.I = false;
+                    engine.M = false;
                 },
             });
             const speakRes = await speakWithDefaults(ctx, {
@@ -547,8 +550,8 @@ class BridgeHarnessRuntimeTests(unittest.TestCase):
             async function runPitchCase(postPitch, inputSamples, artificialRate) {
                 const ctx = createHarnessContext();
                 createFakeEngine(ctx, {
-                    onSpeak: async (_t, _o, engine, workletNode) => {
-                        engine.I = true;
+                    onSpeak: async (_t, _o, _u, engine, workletNode) => {
+                        engine.M = true;
                         setTimeout(() => {
                             for (let off = 0; off < inputSamples; off += 128) {
                                 const n = Math.min(128, inputSamples - off);
@@ -661,16 +664,16 @@ class BridgeHarnessRuntimeTests(unittest.TestCase):
             let releaseFirstSpeak;
             createFakeEngine(ctx, {
                 extraProps: {
-                    G: { v1: "pkg-dep", v2: "pkg-main" },
-                    N: { v1: "pkg-dep", v2: "pkg-main" },
-                    S: { v1: "/pkg-dep.zvoice", v2: "/pkg-main.zvoice" },
-                    D: { v2: "pkg-dep" },
+                    J: { v1: "pkg-dep", v2: "pkg-main" },
+                    S: { v1: "pkg-dep", v2: "pkg-main" },
+                    U: { v1: "/pkg-dep.zvoice", v2: "/pkg-main.zvoice" },
+                    I: { v2: "pkg-dep" },
                 },
                 onInstallLanguageRequest: async () => {
                     langInstalls++;
                     return { status: "installed" };
                 },
-                onSpeak: async (_text, opts, engine, workletNode) => {
+                onSpeak: async (_text, opts, _utteranceId, engine, workletNode) => {
                     activeSpeakInits++;
                     maxConcurrentSpeakInits = Math.max(maxConcurrentSpeakInits, activeSpeakInits);
                     if (opts.voiceName === "v2") {
@@ -679,7 +682,7 @@ class BridgeHarnessRuntimeTests(unittest.TestCase):
                         });
                     }
                     activeSpeakInits--;
-                    engine.I = true;
+                    engine.M = true;
                     setTimeout(() => {
                         workletNode.port.postMessage({
                             command: "addBuffer",
@@ -715,8 +718,8 @@ class BridgeHarnessRuntimeTests(unittest.TestCase):
                 const ctx = createHarnessContext();
                 const inputSamples = 14400; // 600 ms @ 24 kHz; 115 Hz T0 = 208.7 samples
                 createFakeEngine(ctx, {
-                    onSpeak: async (_t, _o, engine, workletNode) => {
-                        engine.I = true;
+                    onSpeak: async (_t, _o, _u, engine, workletNode) => {
+                        engine.M = true;
                         setTimeout(() => {
                             for (let off = 0; off < inputSamples; off += 600) {
                                 const n = Math.min(600, inputSamples - off);
@@ -793,8 +796,8 @@ class BridgeHarnessRuntimeTests(unittest.TestCase):
                 const ctx = createHarnessContext();
                 const inputSamples = 4800;
                 createFakeEngine(ctx, {
-                    onSpeak: async (_t, _o, engine, workletNode) => {
-                        engine.I = true;
+                    onSpeak: async (_t, _o, _u, engine, workletNode) => {
+                        engine.M = true;
                         setTimeout(() => {
                             const buf = new ctx.Float32Array(inputSamples);
                             for (let i = 0; i < inputSamples; i++) {
@@ -828,6 +831,233 @@ class BridgeHarnessRuntimeTests(unittest.TestCase):
         )
         self.assertGreater(result["lowBandRms"], 0.25)
         self.assertLess(result["aliasBandRms"], result["lowBandRms"] * 0.35)
+
+    def test_on_speak_passes_utterance_id_and_ignores_stale_events(self) -> None:
+        result = _run_harness_js(
+            """
+            const ctx = createHarnessContext();
+            const capturedUtteranceIds = [];
+            const stopArgs = [];
+            let callIndex = 0;
+            createFakeEngine(ctx, {
+                onStop: async (clearPending) => {
+                    stopArgs.push(clearPending);
+                },
+                onSpeak: async (_t, _o, utteranceId, engine, workletNode) => {
+                    callIndex++;
+                    capturedUtteranceIds.push(utteranceId);
+                    engine.M = true;
+                    if (callIndex === 1) {
+                        setTimeout(() => {
+                            // Stale utteranceId event must be ignored while the active utterance continues.
+                            ctx.chrome.runtime.sendMessage({
+                                type: "offscreenTtsEventResponse",
+                                event: { type: "end", utteranceId: "stale-utt-0" },
+                            });
+                            setTimeout(() => {
+                                workletNode.port.postMessage({
+                                    command: "addBuffer",
+                                    buffer: new ctx.Float32Array(128).fill(0.25),
+                                });
+                                emitEndEvent(ctx, engine, { type: "end", utteranceId });
+                            }, 5);
+                        }, 5);
+                    }
+                },
+            });
+
+            const firstRes = await speakWithDefaults(ctx, { sessionId: "utt-1", text: "first" });
+            const firstAudio = ctx.events.filter((e) => e.sessionId === "utt-1" && e.type === "audio").length;
+
+            const secondPromise = speakWithDefaults(ctx, { sessionId: "utt-2", text: "second" });
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            await ctx.googleTtsForNvdaStop();
+            const secondRes = await secondPromise;
+            return { capturedUtteranceIds, stopArgs, firstRes, firstAudio, secondRes };
+            """
+        )
+        self.assertEqual(2, len(result["capturedUtteranceIds"]))
+        self.assertTrue(all(isinstance(u, str) and u for u in result["capturedUtteranceIds"]))
+        self.assertNotEqual(result["capturedUtteranceIds"][0], result["capturedUtteranceIds"][1])
+        self.assertIn(True, result["stopArgs"])
+        self.assertEqual({"success": True}, result["firstRes"])
+        self.assertGreater(result["firstAudio"], 0)
+        self.assertEqual({"success": False, "cancelled": True}, result["secondRes"])
+
+    def test_wasm_timepoints_extract_word_sample_offsets_under_wsola_and_suppress_js_word_events(self) -> None:
+        result = _run_harness_js(
+            """
+            const ctx = createHarnessContext();
+            const rawTimepoints = [
+                { time: 0.015, charIndex: 0, charLength: 5 },
+                { time: 0.24, charIndex: 6, charLength: 5 },
+            ];
+            let currentTpCount = 0;
+            const wasmModule = {
+                _GoogleTtsInitBuffered: () => {
+                    currentTpCount = 0;
+                    return 0;
+                },
+                _GoogleTtsReadBuffered: () => {
+                    currentTpCount = rawTimepoints.length;
+                    return 0;
+                },
+                _GoogleTtsGetTimepointsCount: () => currentTpCount,
+                _GoogleTtsGetTimepointsTimeInSecsAtIndex: (i) => rawTimepoints[i].time,
+                _GoogleTtsGetTimepointsCharIndexAtIndex: (i) => rawTimepoints[i].charIndex,
+                _GoogleTtsGetTimepointsCharLengthAtIndex: (i) => rawTimepoints[i].charLength,
+            };
+            createFakeEngine(ctx, {
+                extraProps: { h: wasmModule },
+                onSpeak: async (_text, _options, utteranceId, engine, workletNode) => {
+                    engine.M = true;
+                    engine.h._GoogleTtsInitBuffered();
+                    engine.h._GoogleTtsReadBuffered();
+                    setTimeout(() => {
+                        for (let off = 0; off < 12000; off += 600) {
+                            workletNode.port.postMessage({
+                                command: "addBuffer",
+                                buffer: new ctx.Float32Array(600).fill(0.15),
+                            });
+                        }
+                        // Out-of-sync JS "word" events must be suppressed once WASM timepoints hook is active.
+                        ctx.chrome.runtime.sendMessage({
+                            type: "offscreenTtsEventResponse",
+                            event: { type: "word", utteranceId, charIndex: 99, length: 2 },
+                        });
+                        emitEndEvent(ctx, engine, { type: "end", utteranceId });
+                    }, 2);
+                },
+            });
+
+            const res = await speakWithDefaults(ctx, {
+                sessionId: "s-wasm-tp",
+                text: "hello world",
+                rate: 1.25,
+                artificialRate: 1.5,
+                postPitch: 1.15,
+                outputGain: 1.0,
+            });
+            let audioSamplesBefore = 0;
+            const marks = [];
+            for (const ev of ctx.events) {
+                if (ev.sessionId !== "s-wasm-tp") continue;
+                if (ev.type === "mark") {
+                    marks.push({
+                        charIndex: ev.charIndex,
+                        charLength: ev.charLength,
+                        sampleOffset: ev.sampleOffset,
+                        audioSamplesBefore,
+                    });
+                } else if (ev.type === "audio" && typeof ev.data === "string") {
+                    audioSamplesBefore += Buffer.from(ev.data, "base64").length / 2;
+                }
+            }
+            return { res, marks, totalOutSamples: audioSamplesBefore };
+            """
+        )
+        self.assertEqual({"success": True}, result["res"])
+        marks = result["marks"]
+        self.assertEqual([0, 6], [m["charIndex"] for m in marks])
+        self.assertEqual([5, 5], [m["charLength"] for m in marks])
+        # Under artificialRate=1.5 @ 24kHz: 0.015s -> 240 samples, 0.24s -> 3840 samples.
+        self.assertEqual(240, marks[0]["sampleOffset"])
+        self.assertEqual(3840, marks[1]["sampleOffset"])
+        for mark in marks:
+            self.assertLessEqual(mark["audioSamplesBefore"], mark["sampleOffset"])
+            self.assertLess(mark["sampleOffset"], result["totalOutSamples"])
+
+    def test_wasm_timepoints_handle_multi_segment_emoji_emit_marks_false_and_js_word_fallback(self) -> None:
+        result = _run_harness_js(
+            """
+            // Part 1: Multi-segment emoji uses Unicode codepoint length (8), not UTF-16 length (9), and emitMarks=false suppresses marks.
+            const ctx1 = createHarnessContext();
+            const segTimepoints = [
+                [
+                    { time: 0.01, charIndex: 0, charLength: 5 },
+                    { time: 0.12, charIndex: 6, charLength: 1 },
+                ],
+                [
+                    { time: 0.02, charIndex: 0, charLength: 5 },
+                ],
+            ];
+            let speakCount = 0;
+            let activeTps = [];
+            const wasmModule = {
+                _GoogleTtsInitBuffered: () => {
+                    activeTps = [];
+                    return 0;
+                },
+                _GoogleTtsReadBuffered: () => 0,
+                _GoogleTtsGetTimepointsCount: () => activeTps.length,
+                _GoogleTtsGetTimepointsTimeInSecsAtIndex: (i) => activeTps[i].time,
+                _GoogleTtsGetTimepointsCharIndexAtIndex: (i) => activeTps[i].charIndex,
+                _GoogleTtsGetTimepointsCharLengthAtIndex: (i) => activeTps[i].charLength,
+            };
+            createFakeEngine(ctx1, {
+                extraProps: { h: wasmModule },
+                onSpeak: async (_text, _options, utteranceId, engine, workletNode) => {
+                    const idx = speakCount++;
+                    engine.M = true;
+                    engine.h._GoogleTtsInitBuffered();
+                    if (idx < segTimepoints.length) {
+                        activeTps = segTimepoints[idx];
+                    }
+                    engine.h._GoogleTtsReadBuffered();
+                    setTimeout(() => {
+                        workletNode.port.postMessage({
+                            command: "addBuffer",
+                            buffer: new ctx1.Float32Array(idx === 0 ? 4800 : 3600).fill(0.12),
+                        });
+                        emitEndEvent(ctx1, engine, { type: "end", utteranceId });
+                    }, 2);
+                },
+            });
+            await speakWithDefaults(ctx1, {
+                sessionId: "s-emoji",
+                text: "hello 😀 world.",
+                segments: ["hello 😀 ", "world."],
+            });
+            const emojiMarks = ctx1.events.filter((e) => e.sessionId === "s-emoji" && e.type === "mark");
+
+            speakCount = 0;
+            await speakWithDefaults(ctx1, {
+                sessionId: "s-no-marks",
+                text: "hello 😀 world.",
+                segments: ["hello 😀 ", "world."],
+                emitMarks: false,
+            });
+            const suppressedMarks = ctx1.events.filter((e) => e.sessionId === "s-no-marks" && e.type === "mark");
+
+            // Part 2: Engine without engine.h falls back to JS "word" events.
+            const ctx2 = createHarnessContext();
+            createFakeEngine(ctx2, {
+                onSpeak: async (_text, _options, utteranceId, engine, workletNode) => {
+                    engine.M = true;
+                    setTimeout(() => {
+                        workletNode.port.postMessage({
+                            command: "addBuffer",
+                            buffer: new ctx2.Float32Array(2400).fill(0.1),
+                        });
+                        ctx2.chrome.runtime.sendMessage({
+                            type: "offscreenTtsEventResponse",
+                            event: { type: "word", utteranceId, charIndex: 4, length: 3 },
+                        });
+                        emitEndEvent(ctx2, engine, { type: "end", utteranceId });
+                    }, 2);
+                },
+            });
+            await speakWithDefaults(ctx2, { sessionId: "s-js-fallback", text: "hi there" });
+            const fallbackMarks = ctx2.events.filter((e) => e.sessionId === "s-js-fallback" && e.type === "mark");
+            return { emojiMarks, suppressedMarks, fallbackMarks };
+            """
+        )
+        self.assertEqual([0, 6, 8], [m["charIndex"] for m in result["emojiMarks"]])
+        self.assertEqual(240, result["emojiMarks"][0]["sampleOffset"])
+        self.assertEqual(2880, result["emojiMarks"][1]["sampleOffset"])
+        self.assertEqual(4800 + 480, result["emojiMarks"][2]["sampleOffset"])
+        self.assertEqual([], result["suppressedMarks"])
+        self.assertEqual([4], [m["charIndex"] for m in result["fallbackMarks"]])
 
 
 if __name__ == "__main__":

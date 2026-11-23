@@ -948,5 +948,34 @@ class UrlAndDomainBoundaryTests(unittest.TestCase):
         self.assertTrue(all(not seg.endswith("mailto:") for seg in uri_segments))
 
 
+class InterpolateByteOffsetTests(unittest.TestCase):
+    processing = processing
+
+    def test_falls_back_to_linear_proportion_and_aligns_pcm_samples_without_checkpoints(self) -> None:
+        self.assertEqual(0, self.processing.interpolate_byte_offset(0, 10, 100))
+        self.assertEqual(50, self.processing.interpolate_byte_offset(5, 10, 100))
+        # Odd byte projections must be floored down to an even 16-bit PCM sample boundary.
+        self.assertEqual(32, self.processing.interpolate_byte_offset(1, 3, 100))
+
+    def test_clamps_bounds_and_handles_empty_totals(self) -> None:
+        self.assertEqual(0, self.processing.interpolate_byte_offset(5, 0, 100))
+        self.assertEqual(0, self.processing.interpolate_byte_offset(5, 10, 0))
+        self.assertEqual(0, self.processing.interpolate_byte_offset(-4, 10, 101))
+        self.assertEqual(100, self.processing.interpolate_byte_offset(99, 10, 101))
+
+    def test_uses_checkpoints_for_exact_hits_piecewise_interpolation_and_tail_span(self) -> None:
+        checkpoints = [(0, 40), (4, 120), (10, 360)]
+        self.assertEqual(0, self.processing.interpolate_byte_offset(0, 20, 1000, checkpoints))
+        self.assertEqual(60, self.processing.interpolate_byte_offset(1, 20, 1000, checkpoints))
+        self.assertEqual(120, self.processing.interpolate_byte_offset(4, 20, 1000, checkpoints))
+        self.assertEqual(240, self.processing.interpolate_byte_offset(7, 20, 1000, checkpoints))
+        self.assertEqual(680, self.processing.interpolate_byte_offset(15, 20, 1000, checkpoints))
+
+    def test_normalizes_out_of_order_and_duplicate_checkpoints_safely(self) -> None:
+        checkpoints = [(6, 201), (4, 100), (6, 260), (25, 1500)]
+        self.assertEqual(200, self.processing.interpolate_byte_offset(6, 20, 1001, checkpoints))
+        self.assertEqual(1000, self.processing.interpolate_byte_offset(20, 20, 1001, checkpoints))
+
+
 if __name__ == "__main__":
     unittest.main()

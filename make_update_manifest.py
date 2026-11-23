@@ -16,7 +16,7 @@ BUILD_INFO_FILE_NAME = "buildInfo.json"
 DEFAULT_CHANNEL = "stable"
 DEFAULT_OUTPUT = "stable.json"
 DEFAULT_URL_TEMPLATE = (
-    "https://github.com/nguyenanhduc09/Google-TTS-For-NVDA/"
+    "https://github.com/phamhungvuong302/Google-TTS-For-NVDA/"
     "releases/download/v{version}/googleTtsForNvda-{version}.nvda-addon"
 )
 VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]*$")

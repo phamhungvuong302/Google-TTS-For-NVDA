@@ -19,7 +19,7 @@ from urllib.parse import urljoin, urlparse
 ADDON_ID = "googleTtsForNvda"
 BUILD_INFO_FILE_NAME = "buildInfo.json"
 UPDATE_CHANNEL = "stable"
-UPDATE_MANIFEST_URL = "https://github.com/nguyenanhduc09/Google-TTS-For-NVDA/releases/latest/download/stable.json"
+UPDATE_MANIFEST_URL = "https://github.com/phamhungvuong302/Google-TTS-For-NVDA/releases/latest/download/stable.json"
 MAX_UPDATE_MANIFEST_BYTES = 256 * 1024
 MAX_UPDATE_PACKAGE_BYTES = 512 * 1024 * 1024
 DOWNLOAD_CHUNK_SIZE = 64 * 1024

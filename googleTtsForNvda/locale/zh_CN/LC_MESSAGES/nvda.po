@@ -47,7 +47,7 @@ msgstr "按语言筛选(&F)："
 
 #: globalPlugins/googleTtsForNvda/settings.py:259
 msgid "&Keep Google TTS browser runtime ready in the background"
-msgstr "让 谷歌TTS的浏览器运行时在后台保持就绪(&K)"
+msgstr "让谷歌TTS的浏览器运行时在后台保持就绪(&K)"
 
 #: globalPlugins/googleTtsForNvda/__init__.py:369
 msgid "&Maybe later"
@@ -89,7 +89,7 @@ msgstr "管理语音包时发生文件系统错误。请检查语音包文件夹
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1361
 msgid "A voice package operation is still running."
-msgstr "语音包操作仍在运行。"
+msgstr "仍有语音包操作正在进行。"
 
 #: globalPlugins/googleTtsForNvda/settings.py:390
 #: globalPlugins/googleTtsForNvda/settings.py:395
@@ -720,7 +720,7 @@ msgstr "克什米尔语"
 
 #: globalPlugins/googleTtsForNvda/settings.py:261
 msgid "Keep Google TTS browser runtime ready in the background"
-msgstr "让 谷歌TTS的浏览器运行时在后台保持就绪"
+msgstr "让谷歌TTS的浏览器运行时在后台保持就绪"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:74
 msgid "Khmer"
@@ -844,7 +844,7 @@ msgstr "语音包 {package} 没有可用的下载链接。"
 msgid ""
 "No Google TTS For NVDA voice packages are installed. Open Google TTS Voice "
 "Manager to download a voice package."
-msgstr "尚未安装 NVDA 谷歌TTS插件的语音包。请打开 谷歌TTS管理器下载语音包。"
+msgstr "尚未安装 NVDA 谷歌TTS插件的语音包。请打开谷歌TTS管理器下载语音包。"
 
 #: globalPlugins/googleTtsForNvda/__init__.py:250
 #: synthDrivers/googleTtsForNvda/__init__.py:326
@@ -859,10 +859,10 @@ msgid ""
 msgstr ""
 "NVDA 谷歌TTS插件尚未安装任何语音。\n"
 "\n"
-"按“确定”打开 谷歌TTS管理器并下载语音包。\n"
+"按“确定”打开谷歌TTS管理器并下载语音包。\n"
 "按“取消”暂时继续使用当前语音合成器。\n"
 "\n"
-"您也可以稍后从 NVDA 菜单 > 工具 > 谷歌TTS管理器打开该窗口，或按 "
+"您也可以稍后从“NVDA 菜单 > 工具 > 谷歌TTS管理器”打开该窗口，或按 "
 "NVDA+Ctrl+Shift+G。"
 
 #: globalPlugins/googleTtsForNvda/__init__.py:412
@@ -876,7 +876,7 @@ msgid ""
 msgstr ""
 "NVDA 谷歌TTS插件已安装的语音均不可用。\n"
 "\n"
-"按“确定”打开 谷歌TTS管理器并安装另一个语音包。\n"
+"按“确定”打开谷歌TTS管理器并安装另一个语音包。\n"
 "按“取消”暂时继续使用当前语音合成器。"
 
 #: synthDrivers/googleTtsForNvda/__init__.py:256
@@ -931,7 +931,7 @@ msgid ""
 "Off. Google TTS For NVDA will start the browser runtime only when you choose "
 "Google TTS as the current synthesizer."
 msgstr ""
-"已关闭。只有将 谷歌TTS选为当前语音合成器时，NVDA 谷歌TTS插件才会启动浏览器运"
+"已关闭。只有将谷歌TTS选为当前语音合成器时，NVDA 谷歌TTS插件才会启动浏览器运"
 "行时。"
 
 #: globalPlugins/googleTtsForNvda/settings.py:492
@@ -956,7 +956,7 @@ msgstr "打开 NVDA 谷歌TTS插件设置。"
 
 #: globalPlugins/googleTtsForNvda/__init__.py:1309
 msgid "Opens the Google TTS Voice Manager."
-msgstr "打开 谷歌TTS管理器。"
+msgstr "打开谷歌TTS管理器。"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:390
 msgid "Package"
@@ -1158,7 +1158,7 @@ msgstr ""
 msgid ""
 "The checked voice packages are not supported by the bundled Google TTS "
 "engine."
-msgstr "随附的 谷歌TTS引擎不支持选中的语音包。"
+msgstr "随附的谷歌TTS引擎不支持选中的语音包。"
 
 #: synthDrivers/googleTtsForNvda/bridge.py:1395
 msgid ""
@@ -1207,7 +1207,7 @@ msgid ""
 "this engine can use. Open Google TTS Voice Manager to install another voice "
 "package."
 msgstr ""
-"NVDA 谷歌TTS插件已安装的语音包中，没有此引擎可用的语音。请打开 谷歌TTS管理器"
+"NVDA 谷歌TTS插件已安装的语音包中，没有此引擎可用的语音。请打开谷歌TTS管理器"
 "安装其他语音包。"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:839
@@ -1243,13 +1243,13 @@ msgstr "找不到语音包文件。请刷新列表，然后重试。"
 msgid ""
 "This voice package is not installed. Open Google TTS Voice Manager to "
 "install it."
-msgstr "此语音包尚未安装。请打开 谷歌TTS管理器进行安装。"
+msgstr "此语音包尚未安装。请打开谷歌TTS管理器进行安装。"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1012
 #: synthDrivers/googleTtsForNvda/bridge.py:1628
 #: synthDrivers/googleTtsForNvda/bridge.py:1675
 msgid "This voice package is not supported by the bundled Google TTS engine."
-msgstr "随附的 谷歌TTS引擎不支持此语音包。"
+msgstr "随附的谷歌TTS引擎不支持此语音包。"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:111
 msgid "Turkish"
@@ -1374,7 +1374,7 @@ msgstr "语音包 {package} 导入后未通过验证。"
 #: synthDrivers/googleTtsForNvda/__init__.py:1565
 msgid ""
 "Voice settings are managed by automatic language profiles. Open the Google "
-"TTS for NVDA category in NVDA Settings to configure them."
+"TTS For NVDA category in NVDA Settings to configure them."
 msgstr ""
 "语音设置由自动语言配置文件管理。请在 NVDA 设置中打开 NVDA 谷歌TTS插件类别进行"
 "配置。"
