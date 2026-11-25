@@ -29,7 +29,8 @@
 		const channel = new MessageChannel();
 		const pendingQueue = [];
 		const activeTimers = new Map();
-		let nextTimerId = 1;
+		const zeroDelayTimerIdBase = 0x40000000;
+		let nextTimerOffset = 1;
 
 		channel.port1.onmessage = () => {
 			const id = pendingQueue.shift();
@@ -47,7 +48,7 @@
 		window.setTimeout = function googleTtsSetTimeout(fn, delay, ...args) {
 			const numericDelay = delay === undefined || delay === null ? 0 : Number(delay);
 			if (typeof fn === "function" && (!Number.isFinite(numericDelay) || numericDelay <= 0)) {
-				const id = -(nextTimerId++);
+				const id = zeroDelayTimerIdBase + (nextTimerOffset++);
 				activeTimers.set(id, { fn, args });
 				pendingQueue.push(id);
 				channel.port2.postMessage(null);
@@ -57,10 +58,7 @@
 		};
 
 		window.clearTimeout = function googleTtsClearTimeout(id) {
-			if (typeof id === "number" && id < 0) {
-				if (activeTimers.delete(id) && activeTimers.size === 0) {
-					pendingQueue.length = 0;
-				}
+			if (typeof id === "number" && activeTimers.delete(id)) {
 				return;
 			}
 			return nativeClearTimeout.call(window, id);
@@ -85,6 +83,7 @@
 	let sessionSamplesEmitted = 0;
 	let segmentHasWasmTimepoints = false;
 	let segmentWasmModuleHooked = false;
+	let wasmModuleHooked = false;
 	let currentOutputGain = 1;
 	let currentArtificialRate = 1;
 	let currentTempoRate = 1;
@@ -105,7 +104,6 @@
 	const synthesisIdlePollMs = 2;
 	const synthesisGeneratingEmptyDelayMs = 500;
 	const synthesisFinishedIdleMs = 80;
-	const synthesisSettledIdleMs = 15;
 	// Span full male/female glottal pitch periods (>= 18 ms) with 50% Hann COLA overlap.
 	const tempoFrameSamples = 440;
 	const tempoOverlapSamples = 220;
@@ -145,7 +143,6 @@
 	let totalTempoInputSamples = 0;
 	let totalTempoEmittedSamples = 0;
 	let sawSynthesisEnd = false;
-	let synthesisEndAt = 0;
 	let synthesisErrorMessage = "";
 	let synthesisGenerating = false;
 	let sessionActive = false;
@@ -313,6 +310,9 @@
 
 	function emit(message, sessionToken = currentSessionToken) {
 		if (!message || !currentSessionId || suppressBridgeAudio || !isCurrentSession(sessionToken)) {
+			return;
+		}
+		if (typeof window.googleTtsForNvdaBridge !== "function") {
 			return;
 		}
 		message.sessionId = currentSessionId;
@@ -1030,9 +1030,11 @@
 			return;
 		}
 		if (event.type === "end") {
+			if (synthesisErrorMessage) {
+				return;
+			}
 			drainPendingWorkletChunks(false);
 			sawSynthesisEnd = true;
-			synthesisEndAt = performance.now();
 			if (currentEndResolver) {
 				currentEndResolver();
 			}
@@ -1040,6 +1042,8 @@
 		}
 		if (event.type === "error") {
 			synthesisErrorMessage = event.errorMessage || event.message || "Browser speech synthesis failed.";
+			clearPortEmptyTimer(currentAudioPort);
+			clearPortEmptyTimer(pendingWorkletPort);
 			if (currentEndResolver) {
 				currentEndResolver();
 			}
@@ -1083,16 +1087,22 @@
 		clearPortEmptyTimer(port);
 		const checkEmpty = () => {
 			port._emptyTimer = null;
-			if (stopped || sawSynthesisEnd || !isCurrentSession(sessionToken) || typeof port.onmessage !== "function") {
+			if (
+				stopped
+				|| sawSynthesisEnd
+				|| synthesisErrorMessage
+				|| !isCurrentSession(sessionToken)
+				|| typeof port.onmessage !== "function"
+			) {
 				return;
 			}
 			if (isEngineStillGenerating()) {
-				port._emptyTimer = scheduleNativeTimeout(checkEmpty, 0);
+				port._emptyTimer = scheduleNativeTimeout(checkEmpty, synthesisIdlePollMs);
 				return;
 			}
 			drainPendingWorkletChunks(false);
 			flushEngineLeftoverSamples(sessionToken);
-			if (!sawSynthesisEnd && typeof port.onmessage === "function") {
+			if (!sawSynthesisEnd && !synthesisErrorMessage && typeof port.onmessage === "function") {
 				port.onmessage({ data: { type: "empty" } });
 			}
 		};
@@ -1144,6 +1154,12 @@
 		queueTempoInput(samples, sessionToken);
 	}
 
+	function flushSegmentOutputs(sessionToken = currentSessionToken) {
+		flushAudioProcessors(sessionToken);
+		flushAudioQueue(sessionToken);
+		flushSegmentTimepointsBeforeSample(Infinity, sessionToken, true);
+	}
+
 	function finishSegmentAudio(hasNextSegment, sessionToken = currentSessionToken) {
 		if (stopped || !isCurrentSession(sessionToken)) {
 			return;
@@ -1151,9 +1167,7 @@
 		if (!hasNextSegment) {
 			return;
 		}
-		flushAudioProcessors(sessionToken);
-		flushAudioQueue(sessionToken);
-		flushSegmentTimepointsBeforeSample(Infinity, sessionToken, true);
+		flushSegmentOutputs(sessionToken);
 	}
 
 	function drainPendingWorkletChunks(allowEmptyNotify = false) {
@@ -1166,7 +1180,7 @@
 		const sessionToken = pendingWorkletSessionToken;
 		pendingWorkletChunks = [];
 		pendingWorkletPort = null;
-		if (stopped || !isCurrentSession(sessionToken)) {
+		if (stopped || synthesisErrorMessage || !isCurrentSession(sessionToken)) {
 			return;
 		}
 		const combined = combineSampleParts(chunks);
@@ -1180,7 +1194,7 @@
 		if (engine && typeof engine.M === "boolean" && !engine.M) {
 			clearPortEmptyTimer(port);
 			flushEngineLeftoverSamples(sessionToken);
-			if (!sawSynthesisEnd && typeof port.onmessage === "function") {
+			if (!sawSynthesisEnd && !synthesisErrorMessage && typeof port.onmessage === "function") {
 				port.onmessage({ data: { type: "empty" } });
 			}
 			return;
@@ -1206,7 +1220,7 @@
 						clearPortEmptyTimer(this);
 						return;
 					}
-					if (stopped) {
+					if (stopped || synthesisErrorMessage) {
 						return;
 					}
 					if (synthesisGenerating) {
@@ -1304,8 +1318,18 @@
 					drainPendingWorkletChunks(false);
 					flushEngineLeftoverSamples(sessionToken);
 					const workletPort = getEngineWorkletPort(engine);
-					if (!sawSynthesisEnd && workletPort && typeof workletPort.onmessage === "function") {
+					if (
+						!stopped
+						&& !sawSynthesisEnd
+						&& !synthesisErrorMessage
+						&& isCurrentSession(sessionToken)
+						&& workletPort
+						&& typeof workletPort.onmessage === "function"
+					) {
 						workletPort.onmessage({ data: { type: "empty" } });
+					}
+					if (stopped || !isCurrentSession(sessionToken)) {
+						return;
 					}
 					if (synthesisErrorMessage) {
 						throw new Error(synthesisErrorMessage);
@@ -1314,12 +1338,13 @@
 				}
 			}
 			if (checkIdleDrain) {
-				const requiredIdleMs = sawSynthesisEnd ? synthesisSettledIdleMs : synthesisFinishedIdleMs;
-				const audioHasDrained = lastChunkAt > 0 && now - lastChunkAt >= requiredIdleMs;
-				const endHasSettled = sawSynthesisEnd && synthesisEndAt > 0 && now - synthesisEndAt >= requiredIdleMs;
-				if (audioHasDrained || (endHasSettled && lastChunkAt <= 0)) {
+				const audioHasDrained = lastChunkAt > 0 && now - lastChunkAt >= synthesisFinishedIdleMs;
+				if (audioHasDrained) {
 					drainPendingWorkletChunks(false);
 					flushEngineLeftoverSamples(sessionToken);
+					if (stopped || !isCurrentSession(sessionToken)) {
+						return;
+					}
 					if (synthesisErrorMessage) {
 						throw new Error(synthesisErrorMessage);
 					}
@@ -1481,12 +1506,52 @@
 		}
 	}
 
+	function raceWithTimeout(promise, timeoutMs, timeoutValue) {
+		let timerId = null;
+		const timeoutPromise = new Promise((resolve) => {
+			timerId = scheduleNativeTimeout(() => {
+				timerId = null;
+				resolve(timeoutValue);
+			}, timeoutMs);
+		});
+		return Promise.race([promise, timeoutPromise]).finally(() => {
+			if (timerId !== null) {
+				clearNativeTimeout(timerId);
+				timerId = null;
+			}
+		});
+	}
+
+	function releaseControlSession(seq, expectedSessionId, { resetOutputGain = false, resetMarkOffset = false } = {}) {
+		if (controlSequence !== seq) {
+			return;
+		}
+		sessionActive = false;
+		if (expectedSessionId === undefined || currentSessionId === expectedSessionId) {
+			currentSessionId = null;
+		}
+		suppressBridgeAudio = false;
+		if (resetOutputGain) {
+			currentOutputGain = 1;
+		}
+		if (resetMarkOffset) {
+			currentMarkOffset = 0;
+		}
+	}
+
 	async function ensureEngineInitialized() {
 		const engine = getTtsEngine();
 		if (!engine) {
 			throw new Error("WASM TTS engine was not loaded.");
 		}
 		if (!initPromise || initializedEngine !== engine) {
+			if (initializedEngine !== engine) {
+				readyLanguages.clear();
+				readyVoices.clear();
+				pendingLanguages.clear();
+				pendingPackagePrepares.clear();
+				wasmModuleHooked = false;
+			}
 			initializedEngine = engine;
 			initPromise = Promise.resolve()
 				.then(() => engine.init("google-tts-for-nvda"))
@@ -1508,7 +1573,6 @@
 		synthesisGenerating = false;
 		synthesisErrorMessage = "";
 		sawSynthesisEnd = false;
-		synthesisEndAt = 0;
 		lastChunkAt = 0;
 		currentSessionId = null;
 		currentUtteranceId = null;
@@ -1525,10 +1589,7 @@
 		}
 		resetAudioQueue();
 		if (inFlightStopPromise) {
-			await Promise.race([
-				inFlightStopPromise,
-				new Promise((resolve) => scheduleNativeTimeout(resolve, 1000)),
-			]);
+			await raceWithTimeout(inFlightStopPromise, 1000, undefined);
 			if (currentSessionToken !== stopToken) {
 				return;
 			}
@@ -1560,10 +1621,11 @@
 
 	async function stopActiveSynthesisWithTimeout(timeoutMs = 1000) {
 		try {
-			const stoppedCleanly = await Promise.race([
+			const stoppedCleanly = await raceWithTimeout(
 				stopActiveSynthesis().then(() => true),
-				new Promise((resolve) => scheduleNativeTimeout(() => resolve(false), timeoutMs)),
-			]);
+				timeoutMs,
+				false
+			);
 			if (!stoppedCleanly) {
 				console.debug("Timed out while stopping WASM TTS engine.");
 			}
@@ -1576,7 +1638,6 @@
 		lastChunkAt = 0;
 		stopped = false;
 		sawSynthesisEnd = false;
-		synthesisEndAt = 0;
 		synthesisErrorMessage = "";
 		synthesisGenerating = false;
 		currentUtteranceId = null;
@@ -1694,14 +1755,7 @@
 			}
 			throw error;
 		} finally {
-			if (controlSequence === seq) {
-				sessionActive = false;
-				if (currentSessionId === request.sessionId) {
-					currentSessionId = null;
-				}
-				suppressBridgeAudio = false;
-				currentOutputGain = 1;
-			}
+			releaseControlSession(seq, request.sessionId, { resetOutputGain: true });
 		}
 	};
 
@@ -1718,6 +1772,9 @@
 			if (!(await stopIfActiveForControl(seq))) {
 				return { success: false, cancelled: true };
 			}
+			if (typeof window.googleTtsForNvdaBridge !== "function") {
+				throw new Error("CDP bridge binding googleTtsForNvdaBridge is not available.");
+			}
 			const lang = typeof request.lang === "string" ? request.lang : "";
 			const voiceName = typeof request.voiceName === "string" ? request.voiceName : "";
 			const engine = await prepareEngineAndLanguage(lang, voiceName, seq);
@@ -1731,11 +1788,6 @@
 			const fallbackText = typeof request.text === "string" && request.text.length ? request.text : "";
 			const textSegments = filteredSegments.length ? filteredSegments : (fallbackText ? [fallbackText] : []);
 			if (!textSegments.length) {
-				if (controlSequence === seq) {
-					sessionActive = false;
-					currentSessionId = null;
-					suppressBridgeAudio = false;
-				}
 				return { success: true, empty: true };
 			}
 			sessionToken = beginSession(sessionId, false);
@@ -1744,7 +1796,8 @@
 			resetSynthesisRunState();
 			collectWasmTimepoints = request.emitMarks !== false;
 			wasmTimepointSessionToken = collectWasmTimepoints ? sessionToken : 0;
-			segmentWasmModuleHooked = collectWasmTimepoints ? installWasmTimepointHook(engine) : false;
+			wasmModuleHooked = collectWasmTimepoints ? installWasmTimepointHook(engine) : false;
+			segmentWasmModuleHooked = wasmModuleHooked;
 			currentArtificialRate = artificialRateFromPayload(request);
 			currentPostPitchFactor = postPitchFactorFromPayload(request);
 			currentTempoRate = tempoRateFromPayload(request);
@@ -1759,12 +1812,14 @@
 				const textSegment = textSegments[segmentIndex];
 				lastChunkAt = 0;
 				sawSynthesisEnd = false;
-				synthesisEndAt = 0;
 				synthesisErrorMessage = "";
 				resetSegmentTimepoints();
-				if (collectWasmTimepoints && !segmentWasmModuleHooked) {
-					segmentWasmModuleHooked = installWasmTimepointHook(engine);
+				if (collectWasmTimepoints && !wasmModuleHooked) {
+					wasmModuleHooked = installWasmTimepointHook(engine);
 				}
+				// Only suppress fallback "word" events if the WASM hook was already installed
+				// before runEngineSpeak() executed for this segment.
+				segmentWasmModuleHooked = wasmModuleHooked;
 				const speakPort = getEngineWorkletPort(engine);
 				if (speakPort) {
 					speakPort._sessionToken = sessionToken;
@@ -1787,11 +1842,14 @@
 				} finally {
 					synthesisGenerating = false;
 				}
-				if (collectWasmTimepoints && !segmentWasmModuleHooked) {
-					segmentWasmModuleHooked = installWasmTimepointHook(engine);
+				if (collectWasmTimepoints && !wasmModuleHooked) {
+					wasmModuleHooked = installWasmTimepointHook(engine);
 				}
 				if (!speakStarted || stopped || controlSequence !== seq || !isCurrentSession(sessionToken)) {
 					return { success: false, cancelled: true };
+				}
+				if (synthesisErrorMessage) {
+					throw new Error(synthesisErrorMessage);
 				}
 				if (lastChunkAt > 0 && !sawSynthesisEnd) {
 					scheduleWorkletEmpty(getEngineWorkletPort(engine), sessionToken);
@@ -1828,36 +1886,28 @@
 			if (voiceName) {
 				readyVoices.add(voiceName);
 			}
-			flushAudioProcessors(sessionToken);
-			flushAudioQueue(sessionToken);
-			flushSegmentTimepointsBeforeSample(Infinity, sessionToken, true);
+			flushSegmentOutputs(sessionToken);
 			emit({ type: "done" }, sessionToken);
 			await stopActiveSynthesisWithTimeout(1000);
-			if (controlSequence === seq) {
-				sessionActive = false;
-				if (currentSessionId === sessionId) {
-					currentSessionId = null;
-				}
-			}
 			return { success: true };
 		} catch (error) {
 			const ownsControl = sessionToken ? isCurrentSession(sessionToken) : controlSequence === seq;
 			if (ownsControl) {
+				if (!sessionToken && requestSessionId) {
+					sessionToken = beginSession(requestSessionId, false);
+				}
 				emit({
 					type: "error",
 					message: error && error.message ? error.message : String(error),
 				}, sessionToken || currentSessionToken);
 				await stopActiveSynthesisWithTimeout(1000);
-				if (controlSequence === seq) {
-					sessionActive = false;
-					if (currentSessionId === requestSessionId) {
-						currentSessionId = null;
-					}
-					currentMarkOffset = 0;
-					suppressBridgeAudio = false;
-				}
 			}
 			throw error;
+		} finally {
+			releaseControlSession(seq, sessionToken ? requestSessionId : undefined, {
+				resetOutputGain: true,
+				resetMarkOffset: true,
+			});
 		}
 	};
 })();

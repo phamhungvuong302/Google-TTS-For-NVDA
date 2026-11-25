@@ -177,6 +177,7 @@ This is optional for most contributions, but recommended when you're touching th
 - [UPDATER_RELEASE_GUIDE.md](UPDATER_RELEASE_GUIDE.md) — release packaging and update manifest generation
 - [tests/README.md](tests/README.md) — detailed standalone test documentation
 - [readme.md](readme.md) — full add-on documentation, features, and configuration
+- [DONATE.md](DONATE.md) — donation details and anonymous contribution log
 - [AGENTS.md](AGENTS.md) — comprehensive engineering guide for coding agents (useful reference for human contributors too)
 
 ---

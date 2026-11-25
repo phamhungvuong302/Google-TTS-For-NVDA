@@ -59,10 +59,10 @@ class ProxyType:
 class proxy_info:
     def __init__(self, **options):
         self.proxy_host = options.get("http_proxy_host", None)
+        self.no_proxy = options.get("http_no_proxy", None)
         if self.proxy_host:
             self.proxy_port = options.get("http_proxy_port", 0)
             self.auth = options.get("http_proxy_auth", None)
-            self.no_proxy = options.get("http_no_proxy", None)
             self.proxy_protocol = options.get("proxy_type", "http")
             # Note: If timeout not specified, default python-socks timeout is 60 seconds
             self.proxy_timeout = options.get("http_proxy_timeout", None)
@@ -79,7 +79,6 @@ class proxy_info:
         else:
             self.proxy_port = 0
             self.auth = None
-            self.no_proxy = None
             self.proxy_protocol = "http"
             self.proxy_timeout = None
 

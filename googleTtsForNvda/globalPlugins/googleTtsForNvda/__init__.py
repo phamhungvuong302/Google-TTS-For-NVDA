@@ -6,7 +6,6 @@ import inspect
 import os
 import threading
 import unicodedata
-import webbrowser
 from typing import Any
 
 import addonHandler
@@ -20,7 +19,6 @@ import synthDriverHandler
 import wx
 from autoSettingsUtils.driverSetting import BooleanDriverSetting, NumericDriverSetting
 from gui import guiHelper
-from logHandler import log
 from speech import speech as speechModule
 
 try:
@@ -104,20 +102,23 @@ from . import settings as settingsModule
 from . import updateGui, updater
 from .settings import GoogleTtsSettingsPanel
 from .uiUtils import (
-    _from_dip,
     bind_read_only_text_focus_announcement,
     dialog_parent,
     is_secure_mode,
+    open_web_url,
     post_popup,
     pre_popup,
     show_message_box,
     show_runtime_error_dialog,
+    show_three_button_dialog,
     window_is_alive,
 )
 from .uiUtils import (
     call_compat as _call_compat,
 )
 from .voiceManager import VoiceManagerDialog
+
+log = language_utils.get_nvda_logger()
 
 addonHandler.initTranslation()
 ensure_config_spec()
@@ -314,8 +315,9 @@ def _call_set_synth_compat(
     acceptsKwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
     positionalArgs: list[Any] = [name]
     kwargs: dict[str, Any] = {}
+    forwardFallback = explicitIsFallback or (explicitLeftToTry and acceptsVarargs and not acceptsKwargs)
     for parameterName, value, shouldForwardIfVar in (
-        ("isFallback", isFallback, explicitIsFallback or "isFallback" in parameters),
+        ("isFallback", isFallback, forwardFallback or "isFallback" in parameters),
         ("_leftToTry", _leftToTry, explicitLeftToTry or "_leftToTry" in parameters),
     ):
         parameter = parameters.get(parameterName)
@@ -347,17 +349,6 @@ def _call_set_synth_compat(
         raise
 
 
-def _normalize_set_synth_args(
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-) -> tuple[str | None, bool, list[str] | None]:
-    name, isFallback, _leftToTry, _extraArgs, _extraKwargs, _expFallback, _expLeft = _extract_set_synth_invocation(
-        args,
-        kwargs,
-    )
-    return name, isFallback, _leftToTry
-
-
 def _clear_dialog_reference(dialog: VoiceManagerDialog) -> None:
     global _dialog
     if _dialog is dialog:
@@ -373,25 +364,34 @@ def _open_voice_manager(initialPage: str = "installed") -> None:
             _dialog = None
         else:
             try:
-                if _dialog.IsShown():
-                    if initialPage == "download":
-                        _dialog.show_download_tab()
-                    _dialog.Raise()
-                    _dialog.focus_default_control()
-                    return
+                isIconized = getattr(_dialog, "IsIconized", None)
+                if callable(isIconized) and isIconized():
+                    iconize = getattr(_dialog, "Iconize", None)
+                    if callable(iconize):
+                        iconize(False)
+                if not _dialog.IsShown():
+                    _dialog.Show()
+                if initialPage == "download":
+                    _dialog.show_download_tab()
+                _dialog.Raise()
+                _dialog.focus_default_control()
+                return
             except RuntimeError:
                 _dialog = None
+    engineError: EngineLibraryError | None = None
     parent = dialog_parent()
     pre_popup()
     try:
         try:
             _dialog = VoiceManagerDialog(parent, _clear_dialog_reference, initialPage=initialPage)
         except EngineLibraryError as exc:
-            _show_engine_library_error(exc)
-            return
-        _dialog.Show()
+            engineError = exc
+        else:
+            _dialog.Show()
     finally:
         post_popup()
+    if engineError is not None:
+        _show_engine_library_error(engineError)
 
 
 def open_voice_manager_download_tab() -> None:
@@ -410,7 +410,7 @@ def _google_tts_voice_status() -> str:
     except EngineLibraryError:
         raise
     except Exception:
-        log.exception("Could not check installed Google TTS voice packages.", exc_info=True)
+        log.exception("Could not check installed Google TTS voice packages.")
         return "missing"
 
 
@@ -445,81 +445,7 @@ def _show_missing_voices_prompt(message: str | None = None) -> None:
 
 
 def _open_web_url(url: str) -> None:
-    try:
-        webbrowser.open(url, new=2)
-    except Exception:
-        log.exception("Could not open URL for Microsoft Edge WebView2 Runtime.", exc_info=True)
-        _show_manual_web_url_dialog(url)
-
-
-def _copy_text_to_clipboard(text: str) -> bool:
-    if not wx.TheClipboard.Open():
-        return False
-    try:
-        wx.TheClipboard.SetData(wx.TextDataObject(text))
-        wx.TheClipboard.Flush()
-        return True
-    finally:
-        wx.TheClipboard.Close()
-
-
-def _show_manual_web_url_dialog(url: str) -> None:
-    if is_secure_mode():
-        return
-    parent = dialog_parent()
-    pre_popup()
-    try:
-        dialog = wx.Dialog(parent, title=_("Google TTS For NVDA"))
-        try:
-            mainSizer = wx.BoxSizer(wx.VERTICAL)
-            helper = guiHelper.BoxSizerHelper(dialog, sizer=mainSizer)
-            message = wx.StaticText(
-                dialog,
-                label=_("The download page could not be opened. Please visit this address manually:"),
-            )
-            message.Wrap(_from_dip(dialog, 520))
-            helper.addItem(message, flag=wx.EXPAND)
-            urlControl = helper.addLabeledControl(
-                _("Download address") + ":",
-                wx.TextCtrl,
-                value=url,
-                style=wx.TE_READONLY | wx.TE_MULTILINE | wx.TE_WORDWRAP,
-            )
-            urlControl.SetName(_("Download address"))
-            bind_read_only_text_focus_announcement(urlControl, minLines=2, maxLines=5)
-            buttonSizer = wx.BoxSizer(wx.HORIZONTAL)
-            copyButton = wx.Button(dialog, label=_("&Copy link"))
-            closeButton = wx.Button(dialog, id=wx.ID_OK, label=_("&Close"))
-            buttonSizer.Add(copyButton, border=guiHelper.BORDER_FOR_DIALOGS, flag=wx.RIGHT)
-            buttonSizer.Add(closeButton)
-            mainSizer.Add(buttonSizer, border=guiHelper.BORDER_FOR_DIALOGS, flag=wx.ALL | wx.ALIGN_RIGHT)
-            dialog.SetSizerAndFit(mainSizer)
-            dialog.SetEscapeId(wx.ID_OK)
-            closeButton.SetDefault()
-
-            def on_copy(evt: wx.CommandEvent) -> None:
-                if _copy_text_to_clipboard(url):
-                    show_message_box(
-                        _("The link was copied to the clipboard."),
-                        _("Google TTS For NVDA"),
-                        wx.OK | wx.ICON_INFORMATION,
-                        dialog,
-                    )
-                else:
-                    show_message_box(
-                        _("The link could not be copied to the clipboard."),
-                        _("Google TTS For NVDA"),
-                        wx.OK | wx.ICON_ERROR,
-                        dialog,
-                    )
-
-            copyButton.Bind(wx.EVT_BUTTON, on_copy)
-            closeButton.Bind(wx.EVT_BUTTON, lambda evt: dialog.EndModal(wx.ID_OK))
-            dialog.ShowModal()
-        finally:
-            dialog.Destroy()
-    finally:
-        post_popup()
+    open_web_url(url, logContext="Microsoft Edge WebView2 Runtime")
 
 
 def show_edge_webview2_prompt() -> None:
@@ -528,44 +454,19 @@ def show_edge_webview2_prompt() -> None:
         return
     _edgeWebView2PromptActive = True
     try:
-        parent = dialog_parent()
-        pre_popup()
-        result = wx.ID_CANCEL
-        try:
-            dialog = wx.Dialog(parent, title=_("Microsoft Edge WebView2 Runtime is needed"))
-            try:
-                mainSizer = wx.BoxSizer(wx.VERTICAL)
-                message = wx.StaticText(
-                    dialog,
-                    label=_(
-                        "Microsoft Edge is available, but Microsoft Edge WebView2 Runtime is not available.\n\n"
-                        "Google TTS For NVDA needs WebView2 when Microsoft Edge is the Chromium browser runtime. "
-                        "NVDA will keep using the previous synthesizer until WebView2 is installed.\n\n"
-                        "Choose Download online installer to download Microsoft's Evergreen Bootstrapper. "
-                        "Choose Open Microsoft WebView2 page if you need an offline installer or a fixed-version package."
-                    ),
-                )
-                message.Wrap(_from_dip(dialog, 520))
-                mainSizer.Add(message, border=guiHelper.BORDER_FOR_DIALOGS, flag=wx.ALL | wx.EXPAND)
-                buttonSizer = wx.BoxSizer(wx.HORIZONTAL)
-                downloadButton = wx.Button(dialog, label=_("&Download online installer"))
-                webPageButton = wx.Button(dialog, label=_("&Open Microsoft WebView2 page"))
-                laterButton = wx.Button(dialog, id=wx.ID_CANCEL, label=_("&Maybe later"))
-                buttonSizer.Add(downloadButton, border=guiHelper.BORDER_FOR_DIALOGS, flag=wx.RIGHT)
-                buttonSizer.Add(webPageButton, border=guiHelper.BORDER_FOR_DIALOGS, flag=wx.RIGHT)
-                buttonSizer.Add(laterButton)
-                mainSizer.Add(buttonSizer, border=guiHelper.BORDER_FOR_DIALOGS, flag=wx.ALL | wx.ALIGN_RIGHT)
-                dialog.SetSizerAndFit(mainSizer)
-                dialog.SetEscapeId(wx.ID_CANCEL)
-                downloadButton.SetDefault()
-                downloadButton.Bind(wx.EVT_BUTTON, lambda evt: dialog.EndModal(wx.ID_YES))
-                webPageButton.Bind(wx.EVT_BUTTON, lambda evt: dialog.EndModal(wx.ID_NO))
-                laterButton.Bind(wx.EVT_BUTTON, lambda evt: dialog.EndModal(wx.ID_CANCEL))
-                result = dialog.ShowModal()
-            finally:
-                dialog.Destroy()
-        finally:
-            post_popup()
+        result, _parentWindow = show_three_button_dialog(
+            title=_("Microsoft Edge WebView2 Runtime is needed"),
+            messageText=_(
+                "Microsoft Edge is available, but Microsoft Edge WebView2 Runtime is not available.\n\n"
+                "Google TTS For NVDA needs WebView2 when Microsoft Edge is the Chromium browser runtime. "
+                "NVDA will keep using the previous synthesizer until WebView2 is installed.\n\n"
+                "Choose Download online installer to download Microsoft's Evergreen Bootstrapper. "
+                "Choose Open Microsoft WebView2 page if you need an offline installer or a fixed-version package."
+            ),
+            primaryLabel=_("&Download online installer"),
+            secondaryLabel=_("&Open Microsoft WebView2 page"),
+            cancelLabel=_("&Maybe later"),
+        )
         if result == wx.ID_YES:
             _open_web_url(_EDGE_WEBVIEW2_BOOTSTRAPPER_URL)
         elif result == wx.ID_NO:
@@ -653,7 +554,7 @@ def _patch_synth_selection() -> None:
         settingsDialogs = getattr(gui, "settingsDialogs", None)
         if settingsDialogs is not None and hasattr(settingsDialogs, "setSynth"):
             dialogSetSynth = settingsDialogs.setSynth
-            if not _callable_contains_target(dialogSetSynth, _set_synth_with_google_tts_voice_prompt):
+            if dialogSetSynth is _originalSetSynth:
                 _originalSettingsDialogSetSynth = dialogSetSynth
                 settingsDialogs.setSynth = _set_synth_with_google_tts_voice_prompt
         return
@@ -676,8 +577,9 @@ def _patch_synth_selection() -> None:
     settingsDialogs = getattr(gui, "settingsDialogs", None)
     if settingsDialogs is not None and hasattr(settingsDialogs, "setSynth"):
         dialogSetSynth = _unwrap_self_reference(settingsDialogs.setSynth, _set_synth_with_google_tts_voice_prompt)
-        _originalSettingsDialogSetSynth = dialogSetSynth if dialogSetSynth is not None else originalSetSynth
-        settingsDialogs.setSynth = _set_synth_with_google_tts_voice_prompt
+        if dialogSetSynth is None or dialogSetSynth is originalSetSynth:
+            _originalSettingsDialogSetSynth = originalSetSynth
+            settingsDialogs.setSynth = _set_synth_with_google_tts_voice_prompt
 
 
 def _unpatch_synth_selection() -> None:
@@ -730,7 +632,7 @@ def _make_read_only_text_setting_control(self: Any, setting: Any, settingsStorag
     try:
         self.bindHelpEvent(self._getSettingControlHelpId(setting.id), edit)
     except Exception:
-        log.debug("Could not bind help for Google TTS read-only speech setting.", exc_info=True)
+        log.debugWarning("Could not bind help for Google TTS read-only speech setting.", exc_info=True)
     lastControl = getattr(self, "lastControl", None)
     if lastControl is not None:
         edit.MoveAfterInTabOrder(lastControl)
@@ -781,7 +683,7 @@ def _hide_google_tts_auto_profile_speech_controls(panel: Any) -> None:
                 control.Show()
                 control.Enable()
         except Exception:
-            log.debug("Could not hide Google TTS auto-profile speech setting.", exc_info=True)
+            log.debugWarning("Could not hide Google TTS auto-profile speech setting.", exc_info=True)
     panel._googleTtsHidAutoProfileSpeechControls = hideControls
     try:
         panel.Layout()
@@ -789,7 +691,7 @@ def _hide_google_tts_auto_profile_speech_controls(panel: Any) -> None:
         if parent is not None and window_is_alive(parent):
             parent.Layout()
     except Exception:
-        log.debug("Could not relayout Google TTS Speech Settings controls.", exc_info=True)
+        log.debugWarning("Could not relayout Google TTS Speech Settings controls.", exc_info=True)
 
 
 def _patch_read_only_text_setting() -> None:
@@ -863,7 +765,7 @@ def _patch_read_only_text_setting() -> None:
                 self.settingsSizer.Show(self.sizerDict[setting.id])
                 getattr(self, f"{setting.id}Edit").SetValue(str(getattr(settingsStorage, setting.id, "") or ""))
             except Exception:
-                log.debug("Could not update Google TTS read-only speech setting.", exc_info=True)
+                log.debugWarning("Could not update Google TTS read-only speech setting.", exc_info=True)
             return
         settingId = getattr(setting, "id", "")
         if getattr(settingsStorage, "name", "") == SYNTH_NAME and settingId in ("voice", "variant"):
@@ -881,7 +783,7 @@ def _patch_read_only_text_setting() -> None:
                             for option in options:
                                 control.Append(option.displayName)
             except Exception:
-                log.debug("Could not refresh Google TTS %s choices.", settingId, exc_info=True)
+                log.debugWarning("Could not refresh Google TTS %s choices.", settingId, exc_info=True)
         return _call_compat(originalUpdateValueForControl, self, setting, settingsStorage, *args, **originalKwargs)
 
     def _on_discard(self: Any, *args: Any, **kwargs: Any) -> None:
@@ -914,7 +816,7 @@ def _patch_read_only_text_setting() -> None:
             try:
                 control.Unbind(wx.EVT_CHOICE)
             except Exception:
-                log.debug("Could not unbind Google TTS speech setting control.", exc_info=True)
+                log.debugWarning("Could not unbind Google TTS speech setting control.", exc_info=True)
         settingsInst.loadSettings()
         if originalOnDiscard is not None:
             try:
@@ -945,7 +847,7 @@ def _patch_read_only_text_setting() -> None:
                     elif getattr(self, "_googleTtsHidAutoProfileSpeechControls", False):
                         _hide_google_tts_auto_profile_speech_controls(self)
                 except Exception:
-                    log.debug("Could not sync Google TTS Speech Settings panel on refresh.", exc_info=True)
+                    log.debugWarning("Could not sync Google TTS Speech Settings panel on refresh.", exc_info=True)
             return result
         except RuntimeError as exc:
             if window_is_alive(self) and "has been deleted" not in str(exc):
@@ -1096,8 +998,9 @@ def _patch_voice_dictionary_dialog() -> None:
             if _google_auto_language_detection_active():
                 _show_voice_dictionary_auto_language_message()
                 return None
-            _voiceDictCache.clear()
-            _activeLoadedVoiceDictVariant = None
+            with _voiceDictLock:
+                _voiceDictCache.clear()
+                _activeLoadedVoiceDictVariant = None
             try:
                 currentSynth = synthDriverHandler.getSynth()
                 if getattr(currentSynth, "name", "") == SYNTH_NAME:
@@ -1105,7 +1008,7 @@ def _patch_voice_dictionary_dialog() -> None:
                     if voice:
                         _load_voice_dictionary_for_voice(currentSynth, voice)
             except Exception:
-                log.debug("Could not reload Google TTS voice dictionary before opening dialog.", exc_info=True)
+                log.debugWarning("Could not reload Google TTS voice dictionary before opening dialog.", exc_info=True)
         return _call_compat(originalPopupSettingsDialog, dialog, *args, **kwargs)
 
     _wrap_nvda_callable(popup_settings_dialog, originalPopupSettingsDialog)
@@ -1170,7 +1073,7 @@ def _google_lang_change_command(language: str | None, *, spelling: bool = False)
         if spelling:
             setattr(command, _GOOGLE_TTS_SPELLING_LANG_ATTR, True)
     except Exception:
-        log.debug("Could not preserve Google TTS language code on LangChangeCommand.", exc_info=True)
+        log.debugWarning("Could not preserve Google TTS language code on LangChangeCommand.", exc_info=True)
     return command
 
 
@@ -1330,7 +1233,7 @@ def _auto_profile_character_context_for_text(
         effectiveLocale = _nvda_locale_for_language(targetLanguage) or _nvda_locale_for_language(locale) or locale
         return settings, effectiveLocale
     except Exception:
-        log.debug("Could not resolve Google TTS auto-language character settings.", exc_info=True)
+        log.debugWarning("Could not resolve Google TTS auto-language character settings.", exc_info=True)
         return None
 
 
@@ -1347,7 +1250,7 @@ def _single_auto_profile_character_settings() -> dict[str, Any] | None:
         )
         return _auto_profile_character_settings_for_language(synth, targetLanguage)
     except Exception:
-        log.debug("Could not resolve single Google TTS auto-language character profile.", exc_info=True)
+        log.debugWarning("Could not resolve single Google TTS auto-language character profile.", exc_info=True)
         return None
 
 
@@ -1498,8 +1401,9 @@ def _patch_google_tts_voice_dictionary_loading() -> None:
                 if voice and _load_voice_dictionary_for_voice(synth, voice):
                     return
         except Exception:
-            log.debug("Could not load Google TTS voice dictionary for the selected variant.", exc_info=True)
-        _activeLoadedVoiceDictVariant = None
+            log.debugWarning("Could not load Google TTS voice dictionary for the selected variant.", exc_info=True)
+        with _voiceDictLock:
+            _activeLoadedVoiceDictVariant = None
         _call_compat(originalLoadVoiceDict, synth, *args, **kwargs)
 
     _wrap_nvda_callable(load_voice_dictionary_for_google_tts_variant, originalLoadVoiceDict)
@@ -1513,7 +1417,7 @@ def _patch_google_tts_voice_dictionary_loading() -> None:
         if getattr(currentSynth, "name", "") == SYNTH_NAME:
             load_voice_dictionary_for_google_tts_variant(currentSynth)
     except Exception:
-        log.debug("Could not load active Google TTS variant voice dictionary on patch init.", exc_info=True)
+        log.debugWarning("Could not load active Google TTS variant voice dictionary on patch init.", exc_info=True)
 
 
 def _unpatch_google_tts_voice_dictionary_loading() -> None:
@@ -1539,8 +1443,15 @@ def _unpatch_google_tts_voice_dictionary_loading() -> None:
     _originalSpeechDictLoadVoiceDict = None
     _originalSpeechDictDefinitionsLoadVoiceDict = None
     _patchedSpeechDictLoadVoiceDict = None
-    _activeLoadedVoiceDictVariant = None
-    _voiceDictCache.clear()
+    with _voiceDictLock:
+        _activeLoadedVoiceDictVariant = None
+        _voiceDictCache.clear()
+
+
+def _is_end_utterance_command(item: Any) -> bool:
+    return (EndUtteranceCommand is not None and isinstance(item, EndUtteranceCommand)) or type(
+        item
+    ).__name__ == "EndUtteranceCommand"
 
 
 def _strip_external_lang_changes_and_coalesce(speechSequence: list[Any]) -> list[Any]:
@@ -1572,7 +1483,7 @@ def _filter_auto_language_speech_sequence(speechSequence: list[Any], *args: Any,
     try:
         autoLanguageEnabled = bool(synth._auto_language_detection_enabled())
     except Exception:
-        log.debug("Could not read Google TTS automatic language profile state.", exc_info=True)
+        log.debugWarning("Could not read Google TTS automatic language profile state.", exc_info=True)
         autoLanguageEnabled = False
     if not autoLanguageEnabled:
         return speechSequence
@@ -1599,7 +1510,7 @@ def _filter_auto_language_speech_sequence(speechSequence: list[Any], *args: Any,
         if baseLanguage not in getattr(synth, "availableVoices", {}):
             baseLanguage = synth.catalog.language_for_voice(synth.voice)
     except Exception:
-        log.debug("Could not resolve Google TTS base language for speech filtering.", exc_info=True)
+        log.debugWarning("Could not resolve Google TTS base language for speech filtering.", exc_info=True)
     filtered: list[Any] = []
     currentAutoLanguage: str | None = None
     inCharacterMode = False
@@ -1617,9 +1528,7 @@ def _filter_auto_language_speech_sequence(speechSequence: list[Any], *args: Any,
                 spellingSequenceLanguage = None
             filtered.append(item)
             continue
-        if (EndUtteranceCommand is not None and isinstance(item, EndUtteranceCommand)) or type(
-            item
-        ).__name__ == "EndUtteranceCommand":
+        if _is_end_utterance_command(item):
             inCharacterMode = False
             filtered.append(item)
             continue
@@ -1644,7 +1553,7 @@ def _filter_auto_language_speech_sequence(speechSequence: list[Any], *args: Any,
             if getattr(item, _GOOGLE_TTS_SPELLING_LANG_ATTR, False):
                 inSpellingSequence = True
                 spellingSequenceLanguage = currentAutoLanguage
-            elif googleLanguage is None:
+            else:
                 inSpellingSequence = False
                 spellingSequenceLanguage = None
             filtered.append(item)
@@ -1705,7 +1614,7 @@ def _filter_auto_language_speech_sequence(speechSequence: list[Any], *args: Any,
                         defaultLanguage=defaultLang,
                     )
                 except Exception:
-                    log.debug("Could not segment mixed text for Google TTS auto-language.", exc_info=True)
+                    log.debugWarning("Could not segment mixed text for Google TTS auto-language.", exc_info=True)
                     segments = [(item, defaultLang or preferred)]
 
                 for segText, segLang in segments:
@@ -1719,7 +1628,7 @@ def _filter_auto_language_speech_sequence(speechSequence: list[Any], *args: Any,
             try:
                 targetLanguage = _auto_detect_language_for_speech_filter(synth, item)
             except Exception:
-                log.debug("Could not auto-detect Google TTS speech language.", exc_info=True)
+                log.debugWarning("Could not auto-detect Google TTS speech language.", exc_info=True)
                 targetLanguage = None
             if targetLanguage is None and currentAutoLanguage is not None:
                 targetLanguage = baseLanguage
@@ -1741,7 +1650,7 @@ def _register_auto_language_speech_filter() -> None:
         # Run before NVDA language reporting so profile-enabled names follow Google detection.
         speech.extensions.filter_speechSequence.moveToEnd(_filter_auto_language_speech_sequence, last=False)
     except Exception:
-        log.debug("Could not prioritize Google TTS speech sequence filter.", exc_info=True)
+        log.debugWarning("Could not prioritize Google TTS speech sequence filter.", exc_info=True)
     _autoLanguageSpeechFilterRegistered = True
 
 
@@ -1752,7 +1661,7 @@ def _unregister_auto_language_speech_filter() -> None:
     try:
         speech.extensions.filter_speechSequence.unregister(_filter_auto_language_speech_sequence)
     except Exception:
-        log.debug("Could not unregister Google TTS auto-language speech filter.", exc_info=True)
+        log.debugWarning("Could not unregister Google TTS auto-language speech filter.", exc_info=True)
     _autoLanguageSpeechFilterRegistered = False
 
 
@@ -1874,7 +1783,7 @@ def _patch_auto_language_voice_dictionary() -> None:
                     if speechUpdates:
                         stack.enter_context(_temporary_config_override(speechConfig, speechUpdates))
                 except Exception:
-                    log.debug("Could not apply Google TTS auto-language speech flags.", exc_info=True)
+                    log.debugWarning("Could not apply Google TTS auto-language speech flags.", exc_info=True)
                 _autoProfileSpeakDepth += 1
                 _speakPipelineState.depth = getattr(_speakPipelineState, "depth", 0) + 1
                 try:
@@ -1919,7 +1828,7 @@ def _patch_auto_language_voice_dictionary() -> None:
                     else:
                         newArgs = (coalesced,)
                 except Exception:
-                    log.debug("Could not coalesce speech sequence for SayAll.", exc_info=True)
+                    log.debugWarning("Could not coalesce speech sequence for SayAll.", exc_info=True)
             return bool(_call_compat(targetSpeakWithoutPauses, *newArgs, **newKwargs))
 
         return _wrap_nvda_callable(wrapped_speak_without_pauses_with_auto_profile, targetSpeakWithoutPauses)
@@ -1987,9 +1896,9 @@ def _patch_auto_language_voice_dictionary() -> None:
                     try:
                         _load_voice_dictionary_for_voice(synth, currentVariant)
                     except Exception:
-                        log.debug("Could not restore Google TTS voice dictionary.", exc_info=True)
+                        log.debugWarning("Could not restore Google TTS voice dictionary.", exc_info=True)
         except Exception:
-            log.debug("Could not apply Google TTS auto-language voice dictionary.", exc_info=True)
+            log.debugWarning("Could not apply Google TTS auto-language voice dictionary.", exc_info=True)
             return call_original_with_locale()
 
     _wrap_nvda_callable(process_text_with_auto_voice_dictionary, originalProcessText)
@@ -2051,7 +1960,7 @@ def _patch_auto_language_voice_dictionary() -> None:
                 if languageHandlingModule is None and "autoLanguageSwitching" in speechConfig:
                     speechUpdates["autoLanguageSwitching"] = multipleProfiles
             except Exception:
-                log.debug("Could not apply Google TTS auto-language %s settings.", logLabel, exc_info=True)
+                log.debugWarning("Could not apply Google TTS auto-language %s settings.", logLabel, exc_info=True)
             else:
                 with (
                     _temporary_config_override(speechConfig, speechUpdates),
@@ -2061,13 +1970,29 @@ def _patch_auto_language_voice_dictionary() -> None:
         if items is None:
             yield from _call_compat(targetFunc, *rawArgs, **rawKwargs)
             return
-        trailingEndUtterances: list[Any] = []
-        while items and (
-            (EndUtteranceCommand is not None and isinstance(items[-1], EndUtteranceCommand))
-            or type(items[-1]).__name__ == "EndUtteranceCommand"
-        ):
-            trailingEndUtterances.append(items.pop())
-        trailingEndUtterances.reverse()
+
+        def _is_post_utterance_reset_command(cmd: Any) -> bool:
+            if _is_end_utterance_command(cmd):
+                return True
+            if CharacterModeCommand is not None and isinstance(cmd, CharacterModeCommand):
+                return not bool(getattr(cmd, "state", False))
+            if SuppressUnicodeNormalizationCommand is not None and isinstance(cmd, SuppressUnicodeNormalizationCommand):
+                return not bool(getattr(cmd, "state", False))
+            return False
+
+        trailingAfterUtterance: list[Any] = []
+        endUtteranceIndex: int | None = None
+        for idx in range(len(items) - 1, -1, -1):
+            if _is_end_utterance_command(items[idx]):
+                endUtteranceIndex = idx
+                break
+            if not _is_post_utterance_reset_command(items[idx]):
+                break
+        if endUtteranceIndex is not None:
+            while endUtteranceIndex > 0 and _is_end_utterance_command(items[endUtteranceIndex - 1]):
+                endUtteranceIndex -= 1
+            trailingAfterUtterance = items[endUtteranceIndex:]
+            del items[endUtteranceIndex:]
         emittedLangCommand = False
         if multipleProfiles and spellingLanguage:
             yield _google_lang_change_command(spellingLanguage, spelling=True)
@@ -2075,16 +2000,12 @@ def _patch_auto_language_voice_dictionary() -> None:
             emittedLangCommand = True
         for item in items:
             if isinstance(item, LangChangeCommand):
-                if multipleProfiles and spellingLanguage and not emittedLangCommand:
-                    yield _google_lang_change_command(spellingLanguage, spelling=True)
-                    yield _GoogleTtsProfileLangCommand(spellingLanguage, spelling=True)
-                    emittedLangCommand = True
                 continue
             yield item
         if emittedLangCommand:
             yield _google_lang_change_command(None)
             yield _GoogleTtsProfileLangCommand(None)
-        yield from trailingEndUtterances
+        yield from trailingAfterUtterance
 
     def get_spelling_speech_with_auto_profile(*args: Any, **kwargs: Any) -> Any:
         yield from _iter_spelling_or_char_desc_with_auto_profile(
@@ -2174,14 +2095,21 @@ def _patch_auto_language_voice_dictionary() -> None:
         if sayAllSpeechWithoutPauses is None:
             return
         currentSpeak = getattr(sayAllSpeechWithoutPauses, "speak", None)
-        if currentSpeak is not None and currentSpeak is not _patchedSayAllSpeak:
+        if (
+            currentSpeak is not None
+            and not _callable_contains_target(currentSpeak, speak_with_auto_profile)
+            and (_patchedSayAllSpeak is None or not _callable_contains_target(currentSpeak, _patchedSayAllSpeak))
+        ):
             _originalSayAllSpeak = currentSpeak
             _patchedSayAllSpeak = (
                 speak_with_auto_profile if currentSpeak is originalSpeak else make_speak_with_auto_profile(currentSpeak)
             )
             sayAllSpeechWithoutPauses.speak = _patchedSayAllSpeak
         currentSwp = getattr(sayAllSpeechWithoutPauses, "speakWithoutPauses", None)
-        if currentSwp is not None and currentSwp is not _patchedSayAllSpeakWithoutPauses:
+        if currentSwp is not None and (
+            _patchedSayAllSpeakWithoutPauses is None
+            or not _callable_contains_target(currentSwp, _patchedSayAllSpeakWithoutPauses)
+        ):
             _originalSayAllSpeakWithoutPauses = currentSwp
             _patchedSayAllSpeakWithoutPauses = make_speak_without_pauses_with_auto_profile(currentSwp)
             sayAllSpeechWithoutPauses.speakWithoutPauses = _patchedSayAllSpeakWithoutPauses
@@ -2201,14 +2129,15 @@ def _patch_auto_language_voice_dictionary() -> None:
     if _originalSpeechPackageSpeak is not None:
         speech.speak = package_speak_with_auto_profile
     if sayAllModule is not None and _originalSayAllInitialize is not None:
+        originalSayAllInitialize = _originalSayAllInitialize
 
         def initialize_say_all_with_auto_profile(*args: Any, **kwargs: Any) -> Any:
-            result = _call_compat(_originalSayAllInitialize, *args, **kwargs)
+            result = _call_compat(originalSayAllInitialize, *args, **kwargs)
             if patchActive[0]:
                 _patch_say_all_handler()
             return result
 
-        _wrap_nvda_callable(initialize_say_all_with_auto_profile, _originalSayAllInitialize)
+        _wrap_nvda_callable(initialize_say_all_with_auto_profile, originalSayAllInitialize)
         _patchedSayAllInitialize = initialize_say_all_with_auto_profile
         sayAllModule.initialize = initialize_say_all_with_auto_profile
     speechModule.processText = process_text_with_auto_voice_dictionary
@@ -2394,7 +2323,7 @@ def _refresh_standby_runtime(reason: str) -> None:
             standby.note_synth_active()
         standby.refresh_async(reason)
     except Exception:
-        log.debug("Could not refresh Google TTS standby browser runtime.", exc_info=True)
+        log.debugWarning("Could not refresh Google TTS standby browser runtime.", exc_info=True)
 
 
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
@@ -2416,14 +2345,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             try:
                 updater.cleanup_update_files()
             except Exception:
-                log.debug("Could not clean temporary Google TTS For NVDA update files.", exc_info=True)
+                log.debugWarning("Could not clean temporary Google TTS For NVDA update files.", exc_info=True)
             try:
                 import core
 
                 core.postNvdaStartup.register(self._on_post_nvda_startup)
                 self._startupUpdateCheckRegistered = True
             except Exception:
-                log.debug("Could not register Google TTS For NVDA automatic update check.", exc_info=True)
+                log.debugWarning("Could not register Google TTS For NVDA automatic update check.", exc_info=True)
             settingsDialogCls = getattr(getattr(gui, "settingsDialogs", None), "NVDASettingsDialog", None)
             categoryClasses = getattr(settingsDialogCls, "categoryClasses", None)
             if isinstance(categoryClasses, list) and GoogleTtsSettingsPanel not in categoryClasses:
@@ -2445,7 +2374,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         try:
             updateGui.start_automatic_update_check()
         except Exception:
-            log.debug("Could not start Google TTS For NVDA automatic update check.", exc_info=True)
+            log.debugWarning("Could not start Google TTS For NVDA automatic update check.", exc_info=True)
         _refresh_standby_runtime("NVDA startup")
 
     def terminate(self, *args: Any, **kwargs: Any) -> None:
@@ -2455,14 +2384,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         try:
             standby.terminate()
         except Exception:
-            log.debug("Could not terminate Google TTS standby browser runtime.", exc_info=True)
+            log.debugWarning("Could not terminate Google TTS standby browser runtime.", exc_info=True)
         if self._startupUpdateCheckRegistered:
             try:
                 import core
 
                 core.postNvdaStartup.unregister(self._on_post_nvda_startup)
             except Exception:
-                log.debug("Could not unregister Google TTS For NVDA automatic update check.", exc_info=True)
+                log.debugWarning("Could not unregister Google TTS For NVDA automatic update check.", exc_info=True)
             self._startupUpdateCheckRegistered = False
         settingsDialogCls = getattr(getattr(gui, "settingsDialogs", None), "NVDASettingsDialog", None)
         categoryClasses = getattr(settingsDialogCls, "categoryClasses", None)

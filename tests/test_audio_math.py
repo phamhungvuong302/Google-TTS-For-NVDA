@@ -193,6 +193,11 @@ class AudioMathTests(unittest.TestCase):
         self.assertAlmostEqual(options["pitch"], 1.0, places=3)
         self.assertAlmostEqual(options["postPitch"], 1.0, places=3)
         self.assertAlmostEqual(options["volume"], 1.0, places=4)
+        self.assertEqual(1.0, audio_math.break_rate_factor(float("nan")))
+        self.assertEqual(1.0, audio_math.end_of_utterance_rate_factor(float("inf")))
+        self.assertEqual(50, audio_math.clamp_int(float("nan"), 50, 0, 100))
+        self.assertTrue(audio_math.coerce_bool("yes"))
+        self.assertFalse(audio_math.coerce_bool("no"))
 
 
 if __name__ == "__main__":

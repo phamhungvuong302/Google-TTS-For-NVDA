@@ -134,6 +134,8 @@ Under **NVDA Menu -> Preferences -> Settings -> Google TTS For NVDA**, you can c
   * **Automatically check for add-on updates when NVDA starts:** Let Google TTS For NVDA check once after the next NVDA startup. This is off by default.
   * **Add-on update status:** Review the installed add-on version, whether automatic startup checks are on or off, and whether a check is currently running.
   * **Check for updates...:** Manually check for the latest stable add-on release.
+* **Support the add-on:** Contains the donation button below:
+  * **Donate...:** Open the **Donate to Google TTS For NVDA** dialog, which notes that contributions are optional, includes the suggested transfer note (`Thanks for Google TTS For NVDA`), and provides buttons to open the maintainer's PayPal link in your browser or view all payment methods in [DONATE.md](DONATE.md) on GitHub (Vietnam bank transfer, PayPal, US ACH/Fedwire, and international SWIFT). If Windows cannot open a link automatically, the add-on displays the address in a read-only field with a **Copy link** button so you can open it manually.
 * **Input Gestures:** You can assign a custom shortcut to open this settings panel directly from **NVDA Menu -> Preferences -> Input Gestures** under the **Google TTS For NVDA** category.
 
 ### Custom Browser Runtime Paths
@@ -298,3 +300,5 @@ Original co-authors (no longer active developers):
 
 * **Nguyễn Anh Đức**: [ducna1803@gmail.com](mailto:ducna1803@gmail.com) | Telegram: [t.me/anhduc1803](https://t.me/anhduc1803)
 * **Đào Đức Trung**: [trung@ddt.one](mailto:trung@ddt.one) | Telegram: [t.me/Daoductrung](https://t.me/Daoductrung)
+
+Google TTS For NVDA is free, open-source software, and donations are completely optional. If you would like to support ongoing development, see [DONATE.md](DONATE.md) or choose **Donate...** under **NVDA Menu -> Preferences -> Settings -> Google TTS For NVDA**.

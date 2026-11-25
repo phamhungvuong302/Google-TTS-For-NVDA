@@ -97,8 +97,10 @@ class SegmentationFuzzTests(unittest.TestCase):
             text = _random_text(10, 1500, rng=rng)
             for fast_first in (True, False):
                 segments = list(segmenter.iter_text_segments_for_latency(text, fast_first))
-                if not segments:
+                if not text.strip():
+                    self.assertEqual([], segments)
                     continue
+                self.assertTrue(segments, f"Non-empty text produced no segments: {text[:100]!r}")
                 # All segments must be non-empty strings
                 for seg in segments:
                     self.assertIsInstance(seg, str)
@@ -110,6 +112,16 @@ class SegmentationFuzzTests(unittest.TestCase):
                     "".join(joined.split()),
                     f"Segments don't cover full text: {text[:100]}...",
                 )
+                sample_indexes = [(0, 0), (1, len(text) // 2), (2, len(text))]
+                indexed = list(segmenter.iter_indexed_text_segments(text, sample_indexes, fast_first))
+                self.assertEqual([seg for seg, _seg_indexes in indexed], segments)
+                emitted_ids: list[int] = []
+                for seg, seg_indexes in indexed:
+                    for idx_id, rel_offset in seg_indexes:
+                        emitted_ids.append(idx_id)
+                        self.assertGreaterEqual(rel_offset, 0)
+                        self.assertLessEqual(rel_offset, len(seg))
+                self.assertEqual([0, 1, 2], emitted_ids)
 
     def test_latency_segments_respect_max_length(self) -> None:
         """No latency segment should exceed the hard maximum."""

@@ -7,13 +7,12 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
+from .language_utils import canonical_language_root as _canonical_language_root
+from .language_utils import get_nvda_logger
 from .language_utils import language_root as _language_root
 from .language_utils import normalize_language as _normalize_language
 
-try:
-    from logHandler import log
-except Exception:  # pragma: no cover - NVDA is not available in local unit checks.
-    log = None
+log = get_nvda_logger()
 
 # Shared sentinel, command class, and attribute name used by both the synth
 # driver and the global plugin to attach / retrieve a Google TTS language tag
@@ -46,13 +45,14 @@ _LANGUAGE_ALIASES = {
     "ar-xa": {"ar"},
     "cmn": {"zh"},
     "cmn-cn": {"zh-cn", "zh-hans"},
-    "cmn-tw": {"zh-tw"},
+    "cmn-tw": {"zh-tw", "zh-hant"},
     "fil": {"tl", "fil-ph"},
     "fil-ph": {"fil", "tl"},
     "gom": {"kok", "kok-in"},
     "he": {"iw", "he-il"},
     "he-il": {"he", "iw"},
     "id": {"in", "id-id"},
+    "id-id": {"id", "in"},
     "in": {"id", "id-id"},
     "iw": {"he", "he-il"},
     "jv": {"jw", "jv-id"},
@@ -61,24 +61,29 @@ _LANGUAGE_ALIASES = {
     "kok": {"gom", "kok-in"},
     "kok-in": {"kok", "gom"},
     "mni": {"mni-in", "mni-mtei"},
+    "mni-in": {"mni", "mni-mtei"},
     "mni-mtei": {"mni", "mni-in"},
     "nb": {"no", "nn", "nb-no"},
     "nb-no": {"nb", "no", "nn"},
     "nn": {"nb", "nb-no", "no"},
     "no": {"nb", "nb-no", "nn"},
     "or": {"ory", "or-in"},
+    "or-in": {"or", "ory"},
     "ory": {"or", "or-in"},
     "pa": {"pan", "pa-in"},
+    "pa-in": {"pa", "pan"},
     "pan": {"pa", "pa-in"},
     "sat": {"sat-in", "sat-olck"},
+    "sat-in": {"sat", "sat-olck"},
     "sat-olck": {"sat", "sat-in"},
     "sr": {"sr-rs", "sr-cyrl", "sr-latn"},
+    "sr-rs": {"sr", "sr-cyrl", "sr-latn"},
     "sr-cyrl": {"sr", "sr-rs"},
     "sr-latn": {"sr", "sr-rs"},
     "tl": {"fil", "fil-ph"},
-    "yue": {"yue-hk"},
+    "yue": {"yue-hk", "zh-hk"},
     "yue-hk": {"yue", "zh-hk"},
-    "zh": {"cmn-cn", "cmn-tw"},
+    "zh": {"cmn", "cmn-cn", "cmn-tw"},
     "zh-cn": {"cmn-cn", "zh-hans"},
     "zh-hans": {"cmn-cn", "zh-cn"},
     "zh-hant": {"cmn-tw", "yue-hk", "zh-hk", "zh-tw"},
@@ -106,6 +111,7 @@ _LANGUAGE_REDIRECTS: dict[str, str] = {
     "es-ec": "es-mx",
     "de-at": "de-de",
     "de-ch": "de-de",
+    "en-ca": "en-us",
     "en-gb": "en-us",
     "en-au": "en-us",
     "en-in": "en-us",
@@ -113,6 +119,24 @@ _LANGUAGE_REDIRECTS: dict[str, str] = {
     "en-nz": "en-us",
     "it-ch": "it-it",
 }
+
+
+def _subtag_alias_candidates(languageKey: str) -> list[str]:
+    """Return deterministic alias lookup keys including 2-part subtag combinations for 3-part BCP-47 tags."""
+    keys = [languageKey]
+    parts = languageKey.split("-")
+    if len(parts) >= 3:
+        for subKey in (f"{parts[0]}-{parts[-1]}", f"{parts[0]}-{parts[1]}"):
+            if subKey not in keys:
+                keys.append(subKey)
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for lookupKey in keys:
+        for alias in sorted(_language_aliases(lookupKey)):
+            if alias not in seen:
+                seen.add(alias)
+                aliases.append(alias)
+    return aliases
 
 
 def redirect_language(language: str | None, available_languages: set[str]) -> str | None:
@@ -125,7 +149,7 @@ def redirect_language(language: str | None, available_languages: set[str]) -> st
     """
     if not language:
         return None
-    key = language.strip().replace("_", "-").lower()
+    key = _normalize_language(language)
     availableByKey = {
         normalized: available
         for available in sorted(available_languages)
@@ -137,13 +161,21 @@ def redirect_language(language: str | None, available_languages: set[str]) -> st
     redirect = _LANGUAGE_REDIRECTS.get(key)
     if redirect and redirect in availableByKey:
         return availableByKey[redirect]
-    # Try alias matches deterministically (e.g., zh-CN -> cmn-CN, iw-IL -> he-IL).
-    for alias in sorted(_language_aliases(key)):
+    # Try alias matches deterministically (e.g., zh-CN -> cmn-CN, zh-Hant-TW -> cmn-TW, yue -> zh-HK).
+    for alias in _subtag_alias_candidates(key):
         if alias in availableByKey:
             return availableByKey[alias]
-    # Try root and alias-root matches deterministically (e.g., fr-CA -> fr-FR, tl-PH -> fil-PH).
+    # Try root and alias-root matches deterministically (e.g., fr-CA -> fr-FR, tl-PH -> fil-PH, zh-SG -> cmn-CN).
     root = key.split("-", 1)[0]
-    rootMatches = [root, *sorted(_language_aliases(root))]
+    rootMatches = list(
+        dict.fromkeys(
+            [
+                root,
+                _canonical_language_root(root),
+                *(alias.split("-", 1)[0] for alias in sorted(_language_aliases(root))),
+            ]
+        )
+    )
     for targetRoot in rootMatches:
         for availableKey in sorted(availableByKey):
             if availableKey.split("-", 1)[0] == targetRoot:
@@ -196,8 +228,7 @@ class _Cld2Detector:
                 ctypes.byref(isReliable),
             )
         except Exception:
-            if log is not None:
-                log.debug("Could not detect language with CLD2.", exc_info=True)
+            log.debugWarning("Could not detect language with CLD2.", exc_info=True)
             return None
         if not result:
             return None
@@ -238,8 +269,8 @@ class _Cld2Detector:
                         self._library = library
                         return self._library
                     except Exception:
-                        if log is not None and not self._loadErrorLogged:
-                            log.debug("Could not load CLD2 language detector from %s.", dllPath, exc_info=True)
+                        if not self._loadErrorLogged:
+                            log.debugWarning("Could not load CLD2 language detector from %s.", dllPath, exc_info=True)
                 return None
             finally:
                 if self._library is None:
@@ -277,6 +308,31 @@ def resolve_single_grapheme_candidate(
     return None
 
 
+def _latin_fallback_candidate(
+    normalizedText: str,
+    candidateLanguages: list[str],
+    candidateRoots: list[str],
+) -> str | None:
+    """Resolve a Latin candidate when the text actually contains Latin letters."""
+    from .language_profiles import get_character_script, is_letter_codepoint, latin_exemplar_signal
+    from .unicode_data import SUPPORTED_LANGUAGE_SCRIPTS
+
+    hasLatinChars = any(get_character_script(ord(c)) == "Latin" for c in normalizedText if is_letter_codepoint(ord(c)))
+    if not hasLatinChars:
+        return None
+    exemplarWinner = latin_exemplar_signal(normalizedText, candidateRoots)
+    if exemplarWinner:
+        return _candidate_for_language(exemplarWinner, candidateLanguages)
+    if "en" in candidateRoots and any(c.isascii() and is_letter_codepoint(ord(c)) for c in normalizedText):
+        return _candidate_for_language("en", candidateLanguages)
+    latinCandidates = [
+        c for c in candidateLanguages if "Latin" in SUPPORTED_LANGUAGE_SCRIPTS.get(_canonical_language_root(c), ())
+    ]
+    if len(latinCandidates) == 1:
+        return latinCandidates[0]
+    return None
+
+
 def detect_language(
     text: str,
     candidateLanguages: list[str],
@@ -290,15 +346,12 @@ def detect_language(
     if not text:
         return None
     from .language_profiles import (
-        get_character_script,
         has_language_words,
         is_single_grapheme_token,
         is_spelling_only_text,
         language_script_signal,
-        latin_exemplar_signal,
         normalize_mathematical_alphanumeric,
     )
-    from .unicode_data import SUPPORTED_LANGUAGE_SCRIPTS
 
     normalizedText = normalize_mathematical_alphanumeric(text)
     stripped = normalizedText.strip()
@@ -330,39 +383,17 @@ def detect_language(
         candidate = _candidate_for_language(result.language, candidateLanguages)
         if candidate is not None and (result.isReliable or result.percent >= _MIN_RELIABLE_PERCENT):
             return candidate
-        # Language hint recovery: CLD2 predicted a language outside the candidate list
-        # (e.g. ceb, gl, id, ms, la, pt on short Latin text without diacritics).
-        # Restrict the prior to the candidate language space.
-        hasLatinChars = any(get_character_script(ord(c)) == "Latin" for c in normalizedText if c.isalpha())
-        if hasLatinChars:
-            exemplarWinner = latin_exemplar_signal(normalizedText, candidateRoots)
-            if exemplarWinner:
-                return _candidate_for_language(exemplarWinner, candidateLanguages)
-            if "en" in candidateRoots and any(c.isalpha() and ord(c) < 128 for c in normalizedText):
-                return _candidate_for_language("en", candidateLanguages)
-            latinCands = [
-                c for c in candidateLanguages if "Latin" in SUPPORTED_LANGUAGE_SCRIPTS.get(_language_root(c), ())
-            ]
-            if len(latinCands) == 1:
-                return latinCands[0]
 
-    # Non-Latin script fallback via Unicode script ranges
+    # Non-Latin script fallback via Unicode script ranges before Latin recovery so
+    # mixed text like "API の使い方" or "OK Привет" routes to its non-Latin script.
     scriptSignal = language_script_signal(normalizedText, candidateRoots)
     if scriptSignal:
         return _candidate_for_language(scriptSignal, candidateLanguages)
 
-    # Latin exemplar & plain Latin heuristics derived from CLDR exemplar sets
-    exemplarWinner = latin_exemplar_signal(normalizedText, candidateRoots)
-    if exemplarWinner:
-        return _candidate_for_language(exemplarWinner, candidateLanguages)
-    if "en" in candidateRoots and any(c.isalpha() and ord(c) < 128 for c in normalizedText):
-        return _candidate_for_language("en", candidateLanguages)
-
-    latinCandidates = [
-        c for c in candidateLanguages if "Latin" in SUPPORTED_LANGUAGE_SCRIPTS.get(_language_root(c), ())
-    ]
-    if len(latinCandidates) == 1:
-        return latinCandidates[0]
+    # Latin exemplar & plain Latin heuristics (guarded by actual Latin letter presence)
+    latinFallback = _latin_fallback_candidate(normalizedText, candidateLanguages, candidateRoots)
+    if latinFallback:
+        return latinFallback
 
     if preferredLanguage:
         return _preferred_candidate(preferredLanguage, candidateLanguages)
@@ -377,13 +408,17 @@ def _candidate_for_language(language: str, candidateLanguages: list[str]) -> str
     for candidate in candidateLanguages:
         if _normalize_language(candidate) == languageKey:
             return candidate
-    languageAliases = _language_aliases(languageKey)
+    languageAliases = set(_subtag_alias_candidates(languageKey))
     for candidate in candidateLanguages:
         if _normalize_language(candidate) in languageAliases:
             return candidate
     languageRoot = _language_root(languageKey)
     for candidate in candidateLanguages:
         if _language_root(candidate) == languageRoot:
+            return candidate
+    canonicalRoot = _canonical_language_root(languageKey)
+    for candidate in candidateLanguages:
+        if _canonical_language_root(candidate) == canonicalRoot:
             return candidate
     if _language_family(languageKey) == "zh":
         for candidate in candidateLanguages:

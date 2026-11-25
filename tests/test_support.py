@@ -63,7 +63,11 @@ def load_driver_module(moduleName: str) -> Any:
     if not moduleName.isidentifier():
         raise ValueError(f"Invalid driver module name: {moduleName!r}")
     _test_driver_package()
-    return load_module_from_path(f"{_TEST_DRIVER_PACKAGE}.{moduleName}", DRIVER_DIR / f"{moduleName}.py")
+    qualname = f"{_TEST_DRIVER_PACKAGE}.{moduleName}"
+    existing = sys.modules.get(qualname)
+    if existing is not None:
+        return existing
+    return load_module_from_path(qualname, DRIVER_DIR / f"{moduleName}.py")
 
 
 def load_fresh_driver_module(moduleName: str) -> Any:
@@ -226,8 +230,43 @@ class FakeProcessManager:
         with self._lock:
             self._terminated = True
 
+    def stop_browser_process(self) -> None:
+        with self._lock:
+            self._terminated = True
+
+    def browser_memory_usage(self) -> tuple[int, int]:
+        return (0, 0)
+
+    def update_catalog(self, catalog: Any) -> None:
+        self.catalog = catalog
+
     def _log_browser_runtime_failure(self, runtime, exc, has_more_choices):
         pass
+
+
+def make_test_voice_package(
+    package_id: str = "en-us-x-sfg",
+    *,
+    file_id: str = "f1",
+    url: str = "https://example.com/en.zvoice",
+    sha256: str = "a" * 64,
+    compressed_size: int = 100,
+    remote: bool = False,
+    dependent_voice_id: str = "",
+    speakers: tuple[dict[str, Any], ...] = ({"id": "en-1", "speaker": "s1", "language": "en-US"},),
+) -> Any:
+    """Build a catalog.VoicePackage instance with sensible test defaults."""
+    catalog_mod = load_driver_module("catalog")
+    return catalog_mod.VoicePackage(
+        id=package_id,
+        fileId=file_id,
+        url=url,
+        sha256Checksum=sha256,
+        compressedSize=compressed_size,
+        remote=remote,
+        dependentVoiceId=dependent_voice_id,
+        speakers=speakers,
+    )
 
 
 def make_fake_bridge(

@@ -918,7 +918,7 @@ class CheckHtmlTagInterpolationsTests(unittest.TestCase):
         msgstr_good = '<a/href="https://example.com">Link</a>'
         self.assertEqual([], build_i18n._check_html_tag_interpolations(msgid, msgstr_good))
 
-    def test_new_dangerous_media_tags_detected(self) -> None:
+    def test_disallowed_media_tags_detected(self) -> None:
         msgid = "<p>Text</p>"
         for tag in ("audio", "video", "source"):
             msgstr = f"<{tag}>Text</{tag}>"
@@ -2305,12 +2305,12 @@ class DefinitionListTests(unittest.TestCase):
         self.assertIn("<dd>Definition 2</dd>", html_out)
 
     def test_fallback_markdown_multiple_definitions_and_multiline(self) -> None:
-        md = "Apple\n:   A pomaceous fruit\n    grown on trees.\n:   Red or green fruit.\n"
+        md = "Pear\n:   A pomaceous fruit\n    grown on trees.\n:   Yellow or green fruit.\n"
         html_out = build_i18n._fallback_markdown_to_html_body(md)
         self.assertIn("<dl>", html_out)
-        self.assertIn("<dt>Apple</dt>", html_out)
+        self.assertIn("<dt>Pear</dt>", html_out)
         self.assertIn("<dd>A pomaceous fruit grown on trees.</dd>", html_out)
-        self.assertIn("<dd>Red or green fruit.</dd>", html_out)
+        self.assertIn("<dd>Yellow or green fruit.</dd>", html_out)
 
     def test_doc_html_to_markdown_definition_list(self) -> None:
         html_in = "<dl>\n<dt>Term 1</dt>\n<dd>Definition 1</dd>\n<dt>Term 2</dt>\n<dd><p>Definition 2</p></dd>\n</dl>"
@@ -2401,7 +2401,7 @@ class PoSyntaxFallbackTests(unittest.TestCase):
             self.assertTrue(any("duplicate message definition" in e for e in errs))
 
 
-class DocListAndCheckImprovementsTests(unittest.TestCase):
+class DocListAndValidationTests(unittest.TestCase):
     def test_doc_html_to_markdown_loose_lists_with_p(self) -> None:
         md = _html_to_markdown("<ul><li><p>Item 1</p></li><li><p>Item 2</p></li></ul>")
         self.assertEqual("* Item 1\n* Item 2\n", md)
@@ -2519,17 +2519,23 @@ class DocListAndCheckImprovementsTests(unittest.TestCase):
             mo_file = root / "test.mo"
             fake_msgfmt = root / "fake_msgfmt.exe"
             fake_msgfmt.touch()
+            seen_tmp_paths: list[Path] = []
 
             def raise_error(*args: object, **kwargs: object) -> object:
-                tmp_file = mo_file.with_name(f".tmp-{mo_file.name}")
-                tmp_file.touch()
+                cmd = args[0] if args else []
+                if isinstance(cmd, (list, tuple)) and "-o" in cmd:
+                    out_idx = list(cmd).index("-o") + 1
+                    tmp_file = Path(str(cmd[out_idx]))
+                    tmp_file.touch()
+                    seen_tmp_paths.append(tmp_file)
                 raise OSError("Simulated subprocess failure")
 
             with mock.patch("subprocess.run", side_effect=raise_error):
                 build_i18n._compile_mo_file(po_file, mo_file, {"Hi": "Chào"}, msgfmt_path=fake_msgfmt)
 
-            tmp_file = mo_file.with_name(f".tmp-{mo_file.name}")
-            self.assertFalse(tmp_file.is_file())
+            self.assertEqual(1, len(seen_tmp_paths))
+            self.assertFalse(seen_tmp_paths[0].is_file())
+            self.assertEqual([], list(root.glob(f".tmp-{mo_file.name}*")))
             self.assertTrue(mo_file.is_file())
 
     def test_main_rejects_nonexistent_msgfmt_path(self) -> None:
@@ -2685,7 +2691,7 @@ class DocListAndCheckImprovementsTests(unittest.TestCase):
         self.assertTrue(any("Error: unknown check 'invalid_check'" in str(c) for c in print_mock.call_args_list))
 
 
-class BuildI18nAuditRegressionTests(unittest.TestCase):
+class BuildI18nEdgeCaseTests(unittest.TestCase):
     def test_po_missing_msgstr_plurals_msgctxt_and_compile_mo_charset(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -2875,6 +2881,61 @@ class BuildI18nAuditRegressionTests(unittest.TestCase):
                 ):
                     self.assertEqual(build_i18n.main(), 1)
                 write_pot_mock.assert_not_called()
+
+    def test_po_strict_parsing_header_merge_html_checks_and_language_codes(self) -> None:
+        # Strict PO decoder rejects duplicate msgstr / duplicate header / non-C escapes.
+        with (
+            temporary_po_file('msgid "A"\nmsgstr "1"\nmsgstr "2"\n') as dup_msgstr,
+            self.assertRaises(ValueError),
+        ):
+            build_i18n._parse_po(dup_msgstr)
+
+        with temporary_po_file('msgid ""\nmsgstr ""\n\nmsgid ""\nmsgstr ""\n') as dup_hdr:
+            errs = build_i18n._check_po_syntax_fallback(dup_hdr)
+            self.assertTrue(any("duplicate message definition" in e for e in errs))
+
+        # Obsolete entries with msgctxt count once and do not swallow trailing active entries.
+        obsolete_sample = '#~ msgctxt "C"\n#~ msgid "Old"\n#~ msgstr "Cu"\nmsgid "Live"\nmsgstr "Song"\n'
+        cleaned, removed = build_i18n._purge_obsolete_po_entries(obsolete_sample)
+        self.assertEqual(1, removed)
+        self.assertIn('msgid "Live"', cleaned)
+        self.assertNotIn('#~ msgid "Old"', cleaned)
+
+        # Case-insensitive header merge canonicalizes keys without duplicates.
+        merged_lines = build_i18n._merge_po_header("content-type: text/plain; charset=UTF-8\n", language="vi")
+        merged_text = "\n".join(merged_lines)
+        self.assertEqual(1, merged_text.lower().count("content-type:"))
+
+        # Malformed braces, prose --> arrows, and deduplicated disallowed tag errors.
+        self.assertTrue(build_i18n._has_malformed_braces("Broken {name"))
+        self.assertFalse(build_i18n._has_malformed_braces("Escaped {{literal}} and {name}"))
+        self.assertEqual([], build_i18n._check_html_tag_interpolations("<p>A --> B</p>", "<p>X --> Y</p>"))
+        script_errs = build_i18n._check_html_tag_interpolations("<p>Hi</p>", "<script>x()</script>")
+        self.assertEqual(1, sum("disallowed HTML tag: <script>" in e for e in script_errs))
+
+        # Script subtag normalization and Windows reserved dir with extension.
+        self.assertEqual("sr_Latn", build_i18n._normalize_language_code("sr-latn"))
+        self.assertEqual("zh_Hans_CN", build_i18n._normalize_language_code("zh-hans-cn"))
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            targets, errs = build_i18n._resolve_target_directories(["con.a"], root, "locale", "en")
+            self.assertEqual([], targets)
+            self.assertTrue(errs)
+
+            # Multi-char letterOrder entry rejected in languageSort.json.
+            lang_dir = root / "vi"
+            lang_dir.mkdir()
+            (lang_dir / "languageSort.json").write_text('{"letterOrder": ["a", "ch"]}', encoding="utf-8")
+            sort_errs = build_i18n._check_language_sort_file(lang_dir)
+            self.assertTrue(any("single character" in e for e in sort_errs), sort_errs)
+
+            # Nested <a> and unclosed <code> followed by entity in _DocHtmlToMarkdown.
+            md_nested = _html_to_markdown(
+                '<p><a href="https://a.example">Outer <a href="https://b.example">Inner</a></a></p>'
+            )
+            self.assertIn("Inner", md_nested)
+            md_code_entity = _html_to_markdown("<p><code>x</p><p>&amp;</p>")
+            self.assertIn("&", md_code_entity)
 
 
 if __name__ == "__main__":

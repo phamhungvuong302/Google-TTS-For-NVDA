@@ -223,6 +223,96 @@ class PcmSilenceShortenerTests(unittest.TestCase):
         self.assertEqual(output, _samples(b"".join(chunked_parts)))
         self.assertEqual((*([900] * 5), *([0] * 15), *([850] * 5), *([0] * 10), *([800] * 5), *([0] * 10)), output)
 
+    def test_shorten_all_trims_leading_silence_below_min_pause_trigger_while_keeping_mid_stop_closures(self) -> None:
+        pcm = _pcm(*([0] * 30), *([900] * 5), *([0] * 25), *([850] * 5), *([0] * 60))
+        shortener = self.processing.create_pcm_silence_shortener(
+            self.processing.PAUSE_MODE_SHORTEN_ALL,
+            1000,
+            keepSilenceMs=10,
+            minPauseTriggerMs=41,
+        )
+        output = _samples(shortener.feed(pcm) + shortener.finish())
+        self.assertEqual((*([0] * 10), *([900] * 5), *([0] * 25), *([850] * 5), *([0] * 10)), output)
+
+    def test_trailing_eof_glitch_suppressed_when_shortening_and_preserved_when_not_shortening(self) -> None:
+        # Simulate SeaNet end-of-utterance convolutional click (2ms of 125 + 2ms of 0) after 80ms silence.
+        pcm = _pcm(*([1500] * 10), *([0] * 80), 125, -125, 0, 0)
+        for mode, keep_ms in (
+            (self.processing.PAUSE_MODE_SHORTEN_END_ONLY, 20),
+            (self.processing.PAUSE_MODE_SHORTEN_ALL, 10),
+        ):
+            with self.subTest(mode=mode):
+                s_whole = self.processing.create_pcm_silence_shortener(mode, 1000, keep_ms, noiseFloor=110)
+                expected = _samples(s_whole.feed(pcm) + s_whole.finish())
+                self.assertEqual((*([1500] * 10), *([0] * keep_ms)), expected)
+
+                # Verify chunk-boundary invariance across arbitrary byte splits.
+                for chunk_size in (1, 3, 7, 13):
+                    s_chunk = self.processing.create_pcm_silence_shortener(mode, 1000, keep_ms, noiseFloor=110)
+                    parts = [s_chunk.feed(pcm[i : i + chunk_size]) for i in range(0, len(pcm), chunk_size)]
+                    parts.append(s_chunk.finish())
+                    self.assertEqual(expected, _samples(b"".join(parts)))
+
+        # When flush_boundary(shortenPause=False) is requested, nothing is dropped.
+        s_keep = self.processing.create_pcm_silence_shortener(
+            self.processing.PAUSE_MODE_SHORTEN_END_ONLY, 1000, 20, noiseFloor=110
+        )
+        kept = _samples(s_keep.feed(pcm) + s_keep.flush_boundary(shortenPause=False))
+        self.assertEqual(_samples(pcm), kept)
+
+        # Real speech burst above glitch ceiling (e.g. loud final consonant) is preserved.
+        loud_end = _pcm(*([1500] * 10), *([0] * 80), 900, -900)
+        s_loud = self.processing.create_pcm_silence_shortener(
+            self.processing.PAUSE_MODE_SHORTEN_END_ONLY, 1000, 20, noiseFloor=110
+        )
+        self.assertEqual(_samples(loud_end), _samples(s_loud.feed(loud_end) + s_loud.finish()))
+
+        # Low-amplitude quiet speech followed by >10ms of silence (e.g. soft final -p burst) is preserved.
+        soft_mid = _pcm(*([1500] * 10), *([0] * 80), 125, -125, *([0] * 40))
+        s_soft = self.processing.create_pcm_silence_shortener(
+            self.processing.PAUSE_MODE_SHORTEN_END_ONLY, 1000, 20, noiseFloor=110
+        )
+        self.assertEqual(
+            (*([1500] * 10), *([0] * 80), 125, -125, *([0] * 20)),
+            _samples(s_soft.feed(soft_mid) + s_soft.finish()),
+        )
+
+    def test_flush_boundary_trim_next_leading_silence_prevents_double_gap(self) -> None:
+        seg0 = _pcm(*([1200] * 5), *([0] * 90))
+        seg1 = _pcm(*([0] * 45), *([1100] * 5), *([0] * 80))
+
+        # Unpunctuated hidden boundary in mode 1 trims seg0 tail to 20ms and drops seg1's 45ms engine lead-in.
+        s1 = self.processing.create_pcm_silence_shortener(self.processing.PAUSE_MODE_SHORTEN_END_ONLY, 1000, 20)
+        out1 = (
+            s1.feed(seg0)
+            + s1.flush_boundary(shortenPause=True, trimNextLeadingSilence=True)
+            + s1.feed(seg1)
+            + s1.flush_boundary(shortenPause=False)
+        )
+        self.assertEqual((*([1200] * 5), *([0] * 20), *([1100] * 5), *([0] * 80)), _samples(out1))
+
+        # Mode 2 keeps exactly 10ms at the hidden boundary instead of 10ms + 45ms.
+        s2 = self.processing.create_pcm_silence_shortener(
+            self.processing.PAUSE_MODE_SHORTEN_ALL, 1000, 10, minPauseTriggerMs=41
+        )
+        out2 = (
+            s2.feed(seg0)
+            + s2.flush_boundary(shortenPause=True, trimNextLeadingSilence=True)
+            + s2.feed(seg1)
+            + s2.finish()
+        )
+        self.assertEqual((*([1200] * 5), *([0] * 10), *([1100] * 5), *([0] * 10)), _samples(out2))
+
+    def test_zero_keep_and_zero_trigger_exact_fallback(self) -> None:
+        pcm = _pcm(1000, 0, 0, 1000, 0, 0, 0, 1000)
+        shortener = self.processing.create_pcm_silence_shortener(
+            self.processing.PAUSE_MODE_SHORTEN_ALL,
+            1000,
+            keepSilenceMs=0,
+            minPauseTriggerMs=0,
+        )
+        self.assertEqual((1000, 1000, 1000), _samples(shortener.feed(pcm) + shortener.finish()))
+
     def test_unknown_pause_mode_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             self.processing.create_pcm_silence_shortener("unknown", 24000)
@@ -544,9 +634,19 @@ class ShortAudioCacheKeyTests(unittest.TestCase):
             hasNextSegment=False,
         )
 
+        changed_trim = self.processing.segment_audio_cache_key(
+            "hello",
+            self.options,
+            self.processing.PAUSE_MODE_SHORTEN_ALL,
+            hasPreviousSegment=False,
+            hasNextSegment=True,
+            trimLeadingSilence=True,
+        )
+
         self.assertIsNotNone(baseline)
         self.assertNotEqual(baseline, changed_previous)
         self.assertNotEqual(baseline, changed_next)
+        self.assertNotEqual(baseline, changed_trim)
         self.assertIsNone(
             self.processing.segment_audio_cache_key(
                 "hello",
@@ -664,8 +764,8 @@ class UnicodeSentenceTerminatorTests(unittest.TestCase):
 
     def test_meetei_mayek_section_marker(self) -> None:
         is_term = self.processing.is_sentence_terminator_character
-        self.assertTrue(is_term(chr(0xAAF0)))  # ꯰
-        self.assertTrue(is_term(chr(0xAAF1)))  # ꯱
+        self.assertTrue(is_term(chr(0xAAF0)))  # ꫰
+        self.assertTrue(is_term(chr(0xAAF1)))  # ꫱
 
     def test_tailored_ellipsis_is_sentence_terminal(self) -> None:
         is_term = self.processing.is_sentence_terminator_character
@@ -819,6 +919,8 @@ class UrlAndDomainBoundaryTests(unittest.TestCase):
             "Trailing-",
             "Downloads (5)",
             "Opening (",
+            "Hello. \ufe0f",
+            "Downloads (5) \ufe0f",
             'He said "Hello."',
             "(Finished.)",
             "こんにちは。",
@@ -875,9 +977,11 @@ class UrlAndDomainBoundaryTests(unittest.TestCase):
         self.assertEqual(45, trigger_ms(float("nan")))
 
         self.assertEqual(82, noise_floor("vi-vn-x-multi", {"outputGain": 1.70}))
-        self.assertEqual(110, noise_floor("vi-vn-x-multi-seanet", {"outputGain": 1.70}))
-        self.assertEqual(48, noise_floor("en-us-x-multi", {"outputGain": 0.5}))
-        self.assertEqual(128, noise_floor("en-us-x-multi-seanet", {"outputGain": 5.0}))
+        self.assertEqual(162, noise_floor("vi-vn-x-multi-seanet", {"outputGain": 1.70}))
+        self.assertEqual(24, noise_floor("en-us-x-multi", {"outputGain": 0.5}))
+        self.assertEqual(48, noise_floor("en-us-x-multi", {"outputGain": 0.0}))
+        self.assertEqual(12, noise_floor("en-us-x-multi", {"outputGain": 0.1}))
+        self.assertEqual(200, noise_floor("en-us-x-multi-seanet", {"outputGain": 5.0}))
 
     def test_variation_selector_on_punctuation_not_split_or_orphaned(self) -> None:
         # Unicode sentence terminators & soft breaks followed by U+FE0F stay attached and never orphan marks.
@@ -946,6 +1050,15 @@ class UrlAndDomainBoundaryTests(unittest.TestCase):
         uri_text = "Contact " + ("mailto:user@example.com " * 5) + "immediately."
         uri_segments = list(self.segmenter.iter_text_segments_for_latency(uri_text, True))
         self.assertTrue(all(not seg.endswith("mailto:") for seg in uri_segments))
+
+        self.assertEqual([4], self.segmenter.find_sentence_splits("第一句。“第二句”"))
+        self.assertFalse(self.processing._is_dash_like_character("\u05be"))
+        self.assertTrue(self.segmenter.ends_with_pause_punctuation("（测试。）"))
+        self.assertEqual(1.0, self.processing.effective_chrome_rate({"rate": float("nan")}))
+        self.assertEqual(
+            1.0,
+            self.processing.effective_chrome_rate({"rate": 1.0, "artificialRate": float("inf")}),
+        )
 
 
 class InterpolateByteOffsetTests(unittest.TestCase):

@@ -13,14 +13,15 @@ completes and the watcher is restarted.
 from __future__ import annotations
 
 import ctypes
-import logging
 import threading
 from collections.abc import Callable
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger(__name__)
+from .language_utils import get_nvda_logger
+
+log = get_nvda_logger()
 _WINDLL_TYPE = ctypes.WinDLL if isinstance(getattr(ctypes, "WinDLL", None), type) else ctypes.CDLL
 
 
@@ -78,7 +79,11 @@ class DirectoryChangeWatcher:
                 daemon=True,
             )
             self._thread = thread
-        thread.start()
+            try:
+                thread.start()
+            except Exception:
+                self._thread = None
+                raise
 
     def signal_stop(self) -> None:
         """Signal the watcher thread to stop without waiting for it to exit."""
@@ -94,7 +99,7 @@ class DirectoryChangeWatcher:
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=timeout)
             if thread.is_alive():
-                log.warning(f"DirectoryChangeWatcher thread did not terminate within {timeout} seconds.")
+                log.warning("DirectoryChangeWatcher thread did not terminate within %s seconds.", timeout)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -138,29 +143,32 @@ class DirectoryChangeWatcher:
             self._kernel32 = kernel32
             return kernel32
 
+        def _winfunc(restype: Any, *argtypes: Any) -> Any:
+            return ctypes.WINFUNCTYPE(restype, *argtypes, use_last_error=True)
+
         class _Kernel32View:
-            CreateEventW = ctypes.WINFUNCTYPE(
+            CreateEventW = _winfunc(
                 wintypes.HANDLE,
                 wintypes.LPVOID,
                 wintypes.BOOL,
                 wintypes.BOOL,
                 wintypes.LPCWSTR,
             )(("CreateEventW", kernel32))
-            SetEvent = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HANDLE)(("SetEvent", kernel32))
-            CloseHandle = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HANDLE)(("CloseHandle", kernel32))
-            FindFirstChangeNotificationW = ctypes.WINFUNCTYPE(
+            SetEvent = _winfunc(wintypes.BOOL, wintypes.HANDLE)(("SetEvent", kernel32))
+            CloseHandle = _winfunc(wintypes.BOOL, wintypes.HANDLE)(("CloseHandle", kernel32))
+            FindFirstChangeNotificationW = _winfunc(
                 wintypes.HANDLE,
                 wintypes.LPCWSTR,
                 wintypes.BOOL,
                 wintypes.DWORD,
             )(("FindFirstChangeNotificationW", kernel32))
-            FindNextChangeNotification = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HANDLE)(
+            FindNextChangeNotification = _winfunc(wintypes.BOOL, wintypes.HANDLE)(
                 ("FindNextChangeNotification", kernel32)
             )
-            FindCloseChangeNotification = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HANDLE)(
+            FindCloseChangeNotification = _winfunc(wintypes.BOOL, wintypes.HANDLE)(
                 ("FindCloseChangeNotification", kernel32)
             )
-            WaitForMultipleObjects = ctypes.WINFUNCTYPE(
+            WaitForMultipleObjects = _winfunc(
                 wintypes.DWORD,
                 wintypes.DWORD,
                 ctypes.POINTER(wintypes.HANDLE),
@@ -181,6 +189,12 @@ class DirectoryChangeWatcher:
         except Exception:
             pass
 
+    @staticmethod
+    def _close_notification_handles(kernel32: Any, notificationHandles: list[int]) -> None:
+        for handle in notificationHandles:
+            kernel32.FindCloseChangeNotification(handle)
+        notificationHandles.clear()
+
     # ------------------------------------------------------------------
     # Watch thread
     # ------------------------------------------------------------------
@@ -194,7 +208,7 @@ class DirectoryChangeWatcher:
             try:
                 kernel32 = self._ensure_kernel32()
             except Exception:
-                log.debug(
+                log.debugWarning(
                     "Could not initialize Google TTS standby directory watcher.",
                     exc_info=True,
                 )
@@ -202,7 +216,7 @@ class DirectoryChangeWatcher:
 
             stopHandle = kernel32.CreateEventW(None, True, False, None)
             if not stopHandle:
-                log.debug("Could not create Google TTS standby watcher stop event.")
+                log.debugWarning("Could not create Google TTS standby watcher stop event.")
                 return
             with self._lock:
                 if stopEvent.is_set() or (self._thread is not None and self._thread is not threading.current_thread()):
@@ -217,9 +231,7 @@ class DirectoryChangeWatcher:
                     while not stopEvent.is_set():
                         desiredPaths = [path for path in self._paths() if self._path_is_dir(path)][:63]
                         if desiredPaths != notificationPaths:
-                            for handle in notificationHandles:
-                                kernel32.FindCloseChangeNotification(handle)
-                            notificationHandles = []
+                            self._close_notification_handles(kernel32, notificationHandles)
                             notificationPaths = []
                             for path in desiredPaths:
                                 handle = self._watch_path(kernel32, path)
@@ -239,14 +251,14 @@ class DirectoryChangeWatcher:
                             self._INFINITE,
                         )
                         if result == self._WAIT_FAILED:
-                            log.debug(
+                            log.debugWarning(
                                 "Google TTS standby watcher wait failed: %s.",
                                 ctypes.get_last_error(),
                             )
                             return
                         signaledIndex = int(result - self._WAIT_OBJECT_0)
                         if signaledIndex < 0 or signaledIndex >= len(waitHandles):
-                            log.debug(
+                            log.debugWarning(
                                 "Google TTS standby watcher returned an unexpected wait result: %s.",
                                 result,
                             )
@@ -258,16 +270,17 @@ class DirectoryChangeWatcher:
                         if 0 <= pathIndex < len(notificationPaths):
                             reason = f"watched directory changed: {notificationPaths[pathIndex]}"
                             if not kernel32.FindNextChangeNotification(notificationHandles[pathIndex]):
-                                # Force re-creation of handles on next iteration if re-arming failed.
+                                # Close handles immediately so disappearing directories exit cleanly
+                                # instead of re-waiting on a permanently signaled stale handle.
+                                self._close_notification_handles(kernel32, notificationHandles)
                                 notificationPaths = []
                         if not stopEvent.is_set():
                             try:
                                 self._callback(reason)
                             except Exception:
-                                log.debug("Google TTS standby directory watcher callback failed.", exc_info=True)
+                                log.debugWarning("Google TTS standby directory watcher callback failed.", exc_info=True)
                 finally:
-                    for handle in notificationHandles:
-                        kernel32.FindCloseChangeNotification(handle)
+                    self._close_notification_handles(kernel32, notificationHandles)
             finally:
                 with self._lock:
                     if self._stopHandle == stopHandle:
@@ -296,7 +309,7 @@ class DirectoryChangeWatcher:
             self._NOTIFY_FILTER,
         )
         if not handle or handle == self._INVALID_HANDLE_VALUE:
-            log.debug(
+            log.debugWarning(
                 "Could not watch Google TTS standby directory changes for %s: %s.",
                 path,
                 ctypes.get_last_error(),

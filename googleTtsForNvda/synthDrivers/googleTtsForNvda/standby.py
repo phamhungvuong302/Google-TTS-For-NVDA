@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -14,13 +15,6 @@ try:
     import globalVars  # type: ignore
 except Exception:  # pragma: no cover - used when imported standalone outside NVDA.
     globalVars = None  # type: ignore
-
-try:
-    from logHandler import log
-except Exception:  # pragma: no cover - used when imported standalone outside NVDA.
-    import logging
-
-    log = logging.getLogger("googleTtsForNvda")
 
 from . import language_detector, language_utils, voice_store
 from .audio_math import (
@@ -46,14 +40,13 @@ from .bridge import (
     configured_keep_browser_runtime_ready,
 )
 from .catalog import CATALOG_PATH, ENGINE_DIR, ENGINE_VERSION, VoiceCatalog
+from .language_utils import get_nvda_logger
 from .watcher import DirectoryChangeWatcher
+
+log = get_nvda_logger()
 
 ADDON_DIR = Path(__file__).resolve().parents[2]
 _VOICE_WARMUP_TEXT = " "
-
-
-def _config_bool(value: Any, default: bool = False) -> bool:
-    return coerce_bool(value, default)
 
 
 def keep_browser_runtime_ready_enabled() -> bool:
@@ -62,21 +55,23 @@ def keep_browser_runtime_ready_enabled() -> bool:
             if globalVars.appArgs.secure:
                 return False
         except Exception:
-            log.debug("Could not read NVDA secure-mode state for Google TTS standby.", exc_info=True)
+            log.debugWarning("Could not read NVDA secure-mode state for Google TTS standby.", exc_info=True)
             return False
     try:
         return configured_keep_browser_runtime_ready()
     except Exception:
-        log.debug("Could not read Google TTS standby browser runtime setting.", exc_info=True)
+        log.debugWarning("Could not read Google TTS standby browser runtime setting.", exc_info=True)
         return DEFAULT_KEEP_BROWSER_RUNTIME_READY
 
 
-def _profile_int(value: Any, default: int) -> int:
-    return clamp_int(value, default, 0, 100)
-
-
-def _profile_bool(value: Any, default: bool = False) -> bool:
-    return coerce_bool(value, default)
+def _is_bridge_healthy(bridge: Any) -> bool:
+    if bridge is None:
+        return False
+    safeForStandby = getattr(bridge, "safe_for_standby_release", None)
+    isConnected = getattr(bridge, "is_connected", None)
+    return (safeForStandby() if callable(safeForStandby) else True) and (
+        isConnected() if callable(isConnected) else True
+    )
 
 
 def _installed_catalog() -> VoiceCatalog | None:
@@ -115,7 +110,7 @@ def _catalog_signature(catalog: VoiceCatalog) -> tuple[Any, ...]:
     try:
         warmupSignature = tuple(_warmup_voice_ids(catalog, _current_speech_state(catalog)))
     except Exception:
-        log.debug("Could not build Google TTS standby warmup signature.", exc_info=True)
+        log.debugWarning("Could not build Google TTS standby warmup signature.", exc_info=True)
         warmupSignature = ()
     return (configured_browser_runtime(), _wasm_engine_signature(), packageSignature, warmupSignature)
 
@@ -184,10 +179,10 @@ def _current_speech_state(catalog: VoiceCatalog) -> dict[str, Any]:
     voice = _variant_for_language(catalog, language)
     return {
         "voice": voice,
-        "rate": _profile_int(section.get("rate"), 50),
-        "rateBoost": _profile_bool(section.get("rateBoost"), False),
-        "pitch": _profile_int(section.get("pitch"), 50),
-        "volume": _profile_int(section.get("volume"), 100),
+        "rate": clamp_int(section.get("rate"), 50, 0, 100),
+        "rateBoost": coerce_bool(section.get("rateBoost"), False),
+        "pitch": clamp_int(section.get("pitch"), 50, 0, 100),
+        "volume": clamp_int(section.get("volume"), 100, 0, 100),
     }
 
 
@@ -196,7 +191,7 @@ def _auto_language_detection_enabled() -> bool:
         value = config.conf[CONFIG_SECTION][CONFIG_AUTO_LANGUAGE_DETECTION]
     except Exception:
         return DEFAULT_AUTO_LANGUAGE_DETECTION
-    return _config_bool(value, DEFAULT_AUTO_LANGUAGE_DETECTION)
+    return coerce_bool(value, DEFAULT_AUTO_LANGUAGE_DETECTION)
 
 
 def _auto_language_profiles() -> dict[str, dict[str, Any]]:
@@ -246,17 +241,13 @@ def _select_auto_language_candidates(availableLanguages: Any) -> list[str]:
         return [
             availableByKey[languageKey]
             for languageKey, profile in profiles.items()
-            if languageKey in availableByKey and _profile_bool(profile.get("enabled"), False)
+            if languageKey in availableByKey and coerce_bool(profile.get("enabled"), False)
         ]
-    candidates: list[str] = []
-    seen: set[str] = set()
-    for rawLanguage in rawValue.split(","):
-        key = language_utils.normalize_language(rawLanguage)
-        if not key or key in seen or key not in availableByKey:
-            continue
-        candidates.append(availableByKey[key])
-        seen.add(key)
-    return candidates
+    return [
+        availableByKey[key]
+        for code in language_utils.parse_language_codes(rawValue)
+        if (key := language_utils.normalize_language(code)) in availableByKey
+    ]
 
 
 def _auto_language_candidates(catalog: VoiceCatalog) -> list[str]:
@@ -383,10 +374,10 @@ def _auto_language_profile(
         voice = _voice_for_language(catalog, language, fallbackVoice)
     return {
         "voice": voice,
-        "rate": _profile_int(profile.get("rate"), fallbackRate),
-        "rateBoost": _profile_bool(profile.get("rateBoost"), fallbackRateBoost),
-        "pitch": _profile_int(profile.get("pitch"), fallbackPitch),
-        "volume": _profile_int(profile.get("volume"), fallbackVolume),
+        "rate": clamp_int(profile.get("rate"), fallbackRate, 0, 100),
+        "rateBoost": coerce_bool(profile.get("rateBoost"), fallbackRateBoost),
+        "pitch": clamp_int(profile.get("pitch"), fallbackPitch, 0, 100),
+        "volume": clamp_int(profile.get("volume"), fallbackVolume, 0, 100),
     }
 
 
@@ -415,7 +406,7 @@ def _warmup_voice_ids_for_voice(
         speaker = catalog.speaker_for_voice(voiceId)
         package = catalog.package_for_voice(voiceId)
     except Exception:
-        log.debug("Could not resolve Google TTS standby preload voice %s.", voiceId, exc_info=True)
+        log.debugWarning("Could not resolve Google TTS standby preload voice %s.", voiceId, exc_info=True)
         return []
     if package.id in seenPackages:
         return []
@@ -462,7 +453,11 @@ def _warmup_voice_ids(catalog: VoiceCatalog, state: dict[str, Any]) -> list[str]
             try:
                 packageId = catalog.package_for_voice(warmupVoiceId).id
             except Exception:
-                log.debug("Could not resolve Google TTS standby preload package for %s.", warmupVoiceId, exc_info=True)
+                log.debugWarning(
+                    "Could not resolve Google TTS standby preload package for %s.",
+                    warmupVoiceId,
+                    exc_info=True,
+                )
                 continue
             if packageId in seenPackages:
                 continue
@@ -510,7 +505,7 @@ def _warmup_options(catalog: VoiceCatalog) -> list[dict[str, Any]]:
                 ),
             )
         except Exception:
-            log.debug("Could not prepare Google TTS standby preload options for %s.", voiceId, exc_info=True)
+            log.debugWarning("Could not prepare Google TTS standby preload options for %s.", voiceId, exc_info=True)
     return optionsList
 
 
@@ -641,8 +636,15 @@ class _StandbyRuntimeManager:
             daemon=True,
         )
         with self._lock:
-            self._cleanupThreads.add(cleanupThread)
-            cleanupThread.start()
+            if self._shutdown:
+                runInline = True
+            else:
+                runInline = False
+                self._cleanupThreads.add(cleanupThread)
+                cleanupThread.start()
+        if runInline:
+            self._stop_watcher(watcher)
+            self._terminate_bridge(bridge)
 
     def claim_bridge(self, catalog: VoiceCatalog) -> ChromeTtsBridge | None:
         bridgeToTerminate: ChromeTtsBridge | None = None
@@ -656,12 +658,12 @@ class _StandbyRuntimeManager:
             self._cancel_current_worker_locked()
             watcherToStop = self._detach_watchers_locked()
             signature = _catalog_signature(catalog)
-            safeForStandby = getattr(self._bridge, "safe_for_standby_release", None)
-            isConnected = getattr(self._bridge, "is_connected", None)
-            bridgeHealthy = (safeForStandby() if callable(safeForStandby) else True) and (
-                isConnected() if callable(isConnected) else True
-            )
-            if self._bridge is not None and self._ready and self._signature == signature and bridgeHealthy:
+            if (
+                self._bridge is not None
+                and self._ready
+                and self._signature == signature
+                and _is_bridge_healthy(self._bridge)
+            ):
                 claimedBridge = self._bridge
                 self._bridge = None
                 self._signature = None
@@ -690,11 +692,7 @@ class _StandbyRuntimeManager:
     def release_synth_bridge(self, bridge: ChromeTtsBridge, catalog: VoiceCatalog) -> bool:
         previousBridge: ChromeTtsBridge | None = None
         watcherToStop: DirectoryChangeWatcher | None = None
-        safeForStandby = getattr(bridge, "safe_for_standby_release", None)
-        isConnected = getattr(bridge, "is_connected", None)
-        bridgeHealthy = (safeForStandby() if callable(safeForStandby) else True) and (
-            isConnected() if callable(isConnected) else True
-        )
+        bridgeHealthy = _is_bridge_healthy(bridge)
         with self._lock:
             if self._shutdown or not keep_browser_runtime_ready_enabled() or not bridgeHealthy:
                 self._synthActive = False
@@ -728,13 +726,11 @@ class _StandbyRuntimeManager:
         bridgeToTerminate: ChromeTtsBridge | None
         watcherToStop: DirectoryChangeWatcher | None = None
         workerToJoin: threading.Thread | None = None
-        cleanupThreadsToJoin: list[threading.Thread] = []
         with self._lock:
             self._shutdown = True
             self._synthActive = False
             self._generation += 1
             workerToJoin = self._worker
-            cleanupThreadsToJoin = list(self._cleanupThreads)
             bridgeToTerminate = self._clear_standby_locked(cancelWorker=True)
             watcherToStop = self._detach_watchers_locked()
         self._stop_watcher(watcherToStop)
@@ -746,9 +742,21 @@ class _StandbyRuntimeManager:
             and workerToJoin.is_alive()
         ):
             workerToJoin.join(timeout=2.0)
-        for cleanupThread in cleanupThreadsToJoin:
-            if cleanupThread is not threading.current_thread() and cleanupThread.is_alive():
-                cleanupThread.join(timeout=2.0)
+        deadline = time.monotonic() + 2.0
+        while True:
+            with self._lock:
+                cleanupThreadsToJoin = [
+                    thread
+                    for thread in self._cleanupThreads
+                    if thread is not threading.current_thread() and thread.is_alive()
+                ]
+            if not cleanupThreadsToJoin:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            for cleanupThread in cleanupThreadsToJoin:
+                cleanupThread.join(timeout=max(0.01, deadline - time.monotonic()))
 
     def _run_refresh(self, generation: int, cancelEvent: threading.Event, reason: str) -> None:
         bridgeForWorker: ChromeTtsBridge | None = None
@@ -786,6 +794,7 @@ class _StandbyRuntimeManager:
                         and self._bridge is not None
                         and self._ready
                         and self._signature == signature
+                        and _is_bridge_healthy(self._bridge)
                     ):
                         watcherToStop = self._start_watchers_locked()
                         log.debug("Google TTS standby browser runtime already warm, skipping refresh.")
@@ -797,8 +806,10 @@ class _StandbyRuntimeManager:
                     self._bridge is not None
                     and self._signature == signature
                     and not _refresh_reason_requires_runtime_restart(reason)
+                    and _is_bridge_healthy(self._bridge)
                 ):
                     bridgeForWorker = self._bridge
+                    self._ready = False
                 else:
                     bridgeToTerminate = self._bridge
                     bridgeForWorker = ChromeTtsBridge(catalog)
@@ -828,8 +839,15 @@ class _StandbyRuntimeManager:
                 log.debug("Google TTS standby browser runtime is ready.")
         except CdpCancelled:
             log.debug("Google TTS standby browser runtime refresh cancelled.")
-        except Exception:
-            log.debug("Google TTS standby browser runtime refresh failed.", exc_info=True)
+            with self._lock:
+                if generation == self._generation and self._bridge is bridgeForWorker and not self._ready:
+                    bridgeToTerminate = self._clear_standby_locked(cancelWorker=False)
+        except Exception as exc:
+            detail = str(getattr(exc, "technicalDetail", "") or "")
+            if detail:
+                log.debugWarning("Google TTS standby browser runtime refresh failed: %s", detail, exc_info=True)
+            else:
+                log.debugWarning("Google TTS standby browser runtime refresh failed.", exc_info=True)
             with self._lock:
                 if generation == self._generation and self._bridge is bridgeForWorker:
                     bridgeToTerminate = self._clear_standby_locked(cancelWorker=False)
@@ -882,7 +900,7 @@ class _StandbyRuntimeManager:
         try:
             watcher.stop()
         except Exception:
-            log.debug("Could not stop Google TTS standby directory watcher.", exc_info=True)
+            log.debugWarning("Could not stop Google TTS standby directory watcher.", exc_info=True)
 
     def _refresh_from_watcher(self, reason: str, generation: int) -> None:
         if generation != self._generation or self._shutdown:
@@ -897,7 +915,7 @@ class _StandbyRuntimeManager:
         try:
             paths.append(voice_store.voice_dir())
         except Exception:
-            log.debug("Could not resolve Google TTS voices directory for standby watcher.", exc_info=True)
+            log.debugWarning("Could not resolve Google TTS voices directory for standby watcher.", exc_info=True)
         uniquePaths: list[Path] = []
         seen: set[str] = set()
         for path in paths:
@@ -918,7 +936,7 @@ class _StandbyRuntimeManager:
         try:
             bridge.terminate()
         except Exception:
-            log.debug("Could not terminate Google TTS standby browser runtime.", exc_info=True)
+            log.debugWarning("Could not terminate Google TTS standby browser runtime.", exc_info=True)
 
 
 _manager = _StandbyRuntimeManager()

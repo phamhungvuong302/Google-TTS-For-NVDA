@@ -159,15 +159,30 @@ def _calls_name(node: ast.AST | None, expectedName: str) -> bool:
     return False
 
 
+def _docstring_constant_ids(node: ast.AST) -> set[int]:
+    ids: set[int] = set()
+    for child in ast.walk(node):
+        if isinstance(child, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and child.body:
+            first = child.body[0]
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                ids.add(id(first.value))
+    return ids
+
+
 def _references_identifier(node: ast.AST | None, expected: str) -> bool:
     if node is None:
         return False
+    doc_ids = _docstring_constant_ids(node)
     for child in ast.walk(node):
         if isinstance(child, ast.Name) and child.id == expected:
             return True
         if isinstance(child, ast.Attribute) and child.attr == expected:
             return True
-        if isinstance(child, ast.Constant) and child.value == expected:
+        if isinstance(child, ast.Constant) and id(child) not in doc_ids and child.value == expected:
             return True
     return False
 
@@ -226,6 +241,8 @@ def _speech_hooks_category(tree: SourceTree) -> CategoryResult:
             ("speech.speech", "processText"),
             ("speech.speech", "getSpellingSpeech"),
             ("speech.speech", "getSingleCharDescription"),
+            ("speech.sayAll", "SayAllHandler"),
+            ("speech.sayAll", "initialize"),
             ("speech.shortcutKeys", "shouldUseSpellingFunctionality"),
             ("speechDictHandler", "loadVoiceDict"),
             ("speech.commands", "LangChangeCommand"),
@@ -308,7 +325,7 @@ def _general_categories(tree: SourceTree) -> list[CategoryResult]:
             )
         ]
         + [("gui.guiHelper", item) for item in ("BoxSizerHelper", "LabeledControlHelper", "BORDER_FOR_DIALOGS")]
-        + [("gui.nvdaControls", "SelectOnFocusSpinCtrl")],
+        + [("gui.nvdaControls", item) for item in ("SelectOnFocusSpinCtrl", "EnhancedInputSlider")],
     )
     vsp_make_settings = tree.node("gui.settingsDialogs", "VoiceSettingsPanel.makeSettings")
     for ctrl_attr in (
@@ -366,8 +383,8 @@ def _general_categories(tree: SourceTree) -> list[CategoryResult]:
                     "synthDoneSpeaking",
                     "getSynth",
                     "setSynth",
-                    "changeVoice",
                     "findAndSetNextSynth",
+                    "isDebugForSynthDriver",
                 )
             ]
             + [
@@ -409,17 +426,13 @@ def _general_categories(tree: SourceTree) -> list[CategoryResult]:
                 ("globalPluginHandler", "GlobalPlugin"),
                 ("globalPluginHandler", "GlobalPlugin.terminate"),
                 ("core", "postNvdaStartup"),
-                ("core", "callLater"),
-                ("core", "restart"),
                 ("gui", "mainFrame"),
                 ("gui", "MainFrame.popupSettingsDialog"),
                 ("gui", "MainFrame.prePopup"),
                 ("gui", "MainFrame.postPopup"),
+                ("gui", "blockAction"),
                 ("gui", "messageBox"),
                 ("gui", "VoiceDictionaryDialog"),
-                ("scriptHandler", "script"),
-                ("globalCommands", "SCRCAT_SPEECH"),
-                ("globalCommands", "SCRCAT_CONFIG"),
             ],
         ),
         _speech_hooks_category(tree),
@@ -444,6 +457,9 @@ def _general_categories(tree: SourceTree) -> list[CategoryResult]:
                 ("globalVars", "appArgs"),
                 ("globalVars", "appDir"),
                 ("logHandler", "log"),
+                ("logHandler", "Logger.debugWarning"),
+                ("logHandler", "Logger.io"),
+                ("logHandler", "Logger.exception"),
             ],
         ),
         _category(
@@ -468,16 +484,23 @@ def _audio_category(tree: SourceTree) -> CategoryResult:
     players = [name for name in exports if isinstance(tree.node("nvwave", name), ast.ClassDef)]
     result.require("WavePlayer" in exports, "nvwave does not export WavePlayer")
     result.require(bool(players), "No concrete supported WavePlayer class found")
+    checked_init = False
+    first_init: ast.AST | None = None
     for player in players:
         for method in ("feed", "sync", "idle", "stop", "pause", "close"):
             result.require(tree.has("nvwave", f"{player}.{method}"), f"Missing nvwave.{player}.{method}")
-    init = tree.node("nvwave", f"{players[0]}.__init__") if players else None
-    params = _parameters(init)
-    for param in ("channels", "samplesPerSec", "bitsPerSample", "outputDevice"):
-        result.require(param in params, f"{players[0] if players else 'WavePlayer'}.__init__ lacks {param}")
+        init = tree.node("nvwave", f"{player}.__init__")
+        if init is not None:
+            checked_init = True
+            if first_init is None:
+                first_init = init
+            params = _parameters(init)
+            for param in ("channels", "samplesPerSec", "bitsPerSample", "outputDevice"):
+                result.require(param in params, f"{player}.__init__ lacks {param}")
+    result.require(checked_init, "No concrete WavePlayer defines __init__ with required parameters")
     result.require(tree.has("nvwave", "isInError"), "Missing nvwave.isInError")
     result.details.append(f"exports={', '.join(exports) or '<none>'}; concrete={', '.join(players) or '<none>'}")
-    result.details.append(f"constructor={_signature(init)}")
+    result.details.append(f"constructor={_signature(first_init)}")
     result.details.append(
         "error API=isInError; legacy audioDeviceError="
         + ("present" if tree.has("nvwave", "audioDeviceError") else "absent")
@@ -513,7 +536,7 @@ def _high_risk_category(tree: SourceTree) -> CategoryResult:
     result.require(_parameters(refresh) == {"self"}, f"Unexpected AutoSettingsMixin.refreshGui{_signature(refresh)}")
     has_modern_msg = tree.has("gui.message", "MessageDialog")
     if has_modern_msg:
-        for symbol in ("DialogType", "DefaultButton", "ReturnCode"):
+        for symbol in ("DialogType", "DefaultButton", "ReturnCode", "isModalMessageBoxActive"):
             result.require(tree.has("gui.message", symbol), f"Missing gui.message.{symbol}")
         has_wx_call_on_main = tree.has("gui.message", "wxCallOnMain") or tree.has("gui.guiHelper", "wxCallOnMain")
         result.require(has_wx_call_on_main, "Missing wxCallOnMain alongside gui.message.MessageDialog")
@@ -568,12 +591,19 @@ def _addon_guard_category() -> CategoryResult:
         "Missing call_compat/_call_compat helper in language_utils, driver, or global plugin",
     )
     shared_msg_box = _qualified_member(modules[language_utils_path], "show_message_box")
+    popup_guard = _qualified_member(modules[language_utils_path], "_main_frame_popup_guard")
     ui_msg_box = _qualified_member(modules[ui_utils_path], "show_message_box")
+    has_popup_guard = (
+        _references_identifier(shared_msg_box, "prePopup") and _references_identifier(shared_msg_box, "postPopup")
+    ) or (
+        _calls_name(shared_msg_box, "_main_frame_popup_guard")
+        and _references_identifier(popup_guard, "prePopup")
+        and _references_identifier(popup_guard, "postPopup")
+    )
     result.require(
         _references_identifier(shared_msg_box, "IsMainThread")
         and _references_identifier(shared_msg_box, "wxCallOnMain")
-        and _references_identifier(shared_msg_box, "prePopup")
-        and _references_identifier(shared_msg_box, "postPopup")
+        and has_popup_guard
         and (
             (_references_identifier(ui_msg_box, "IsMainThread") and _references_identifier(ui_msg_box, "wxCallOnMain"))
             or _calls_name(ui_msg_box, "_shared_show_message_box")
@@ -612,8 +642,13 @@ def _addon_guard_category() -> CategoryResult:
         )
     patch_auto_fn = _qualified_member(modules[plugin_path], "_patch_auto_language_voice_dictionary")
     iter_spelling_fn = _find_nested_def(patch_auto_fn, "_iter_spelling_or_char_desc_with_auto_profile")
+    end_utterance_helper = _qualified_member(modules[plugin_path], "_is_end_utterance_command")
     result.require(
-        _references_identifier(iter_spelling_fn, "EndUtteranceCommand"),
+        _references_identifier(iter_spelling_fn, "EndUtteranceCommand")
+        or (
+            _calls_name(iter_spelling_fn, "_is_end_utterance_command")
+            and _references_identifier(end_utterance_helper, "EndUtteranceCommand")
+        ),
         "globalPlugins._iter_spelling_or_char_desc_with_auto_profile must keep EndUtteranceCommand at the end of sequence",
     )
     is_voice_dict_fn = _qualified_member(modules[plugin_path], "_is_voice_dictionary_dialog")
@@ -627,6 +662,37 @@ def _addon_guard_category() -> CategoryResult:
         _references_identifier(iter_chunks_fn, "GoogleTtsProfileLangCommand")
         and _references_identifier(modules[plugin_path], "GoogleTtsProfileLangCommand"),
         "globalPlugins and SynthDriver._iter_speech_chunks must support GoogleTtsProfileLangCommand",
+    )
+    result.require(
+        _qualified_member(modules[language_utils_path], "ensure_nvda_logger_methods") is not None
+        and _qualified_member(modules[language_utils_path], "is_debug_for_synth_driver") is not None,
+        "Missing NVDA logging helpers ensure_nvda_logger_methods / is_debug_for_synth_driver in language_utils",
+    )
+    speech_proc_path = ADDON_ROOT / "synthDrivers" / "googleTtsForNvda" / "speech_processing.py"
+    watcher_path = ADDON_ROOT / "synthDrivers" / "googleTtsForNvda" / "watcher.py"
+    for shared_log_path in (speech_proc_path, watcher_path):
+        shared_tree = ast.parse(shared_log_path.read_text(encoding="utf-8-sig"), filename=str(shared_log_path))
+        result.require(
+            _calls_name(shared_tree, "get_nvda_logger") and not _calls_name(shared_tree, "getLogger"),
+            f"{shared_log_path.name} must use get_nvda_logger() so NVDA does not filter its logs as external",
+        )
+    bad_exc_calls: list[str] = []
+    for py_path in ADDON_ROOT.rglob("*.py"):
+        if "websocketClientRepo" in py_path.parts:
+            continue
+        py_tree = ast.parse(py_path.read_text(encoding="utf-8-sig"), filename=str(py_path))
+        for node in ast.walk(py_tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "exception"
+                and len(node.args) > 1
+            ):
+                bad_exc_calls.append(f"{py_path.name}:{node.lineno}")
+    result.require(
+        not bad_exc_calls,
+        "log.exception() must not pass positional formatting args unsupported by NVDA Logger.exception: "
+        + ", ".join(bad_exc_calls),
     )
     entry_points = {
         driver_path: (
@@ -675,11 +741,13 @@ def _addon_guard_category() -> CategoryResult:
         settings_path: (
             "GoogleTtsSettingsPanel.makeSettings",
             "GoogleTtsSettingsPanel.postInit",
+            "GoogleTtsSettingsPanel.onPanelActivated",
             "GoogleTtsSettingsPanel.onSave",
             "GoogleTtsSettingsPanel._refresh_update_controls",
             "GoogleTtsSettingsPanel.on_runtime_choice_changed",
             "GoogleTtsSettingsPanel.on_keep_browser_runtime_ready_changed",
             "GoogleTtsSettingsPanel.on_check_for_updates",
+            "GoogleTtsSettingsPanel.on_donate",
             "GoogleTtsSettingsPanel.on_auto_update_check_changed",
             "GoogleTtsSettingsPanel._on_destroy",
             "GoogleTtsSettingsPanel.on_auto_language_detection_changed",
@@ -711,6 +779,11 @@ def _addon_guard_category() -> CategoryResult:
             plugin_path,
             "_patch_auto_language_voice_dictionary",
             "manager_should_switch_voice_with_auto_profile",
+        ),
+        (
+            plugin_path,
+            "_patch_auto_language_voice_dictionary",
+            "initialize_say_all_with_auto_profile",
         ),
     )
     for path, parentName, nestedName in nestedEntryPoints:
@@ -753,12 +826,12 @@ def discover_trees(paths: list[Path]) -> list[Path]:
     return sorted(found, key=lambda item: item.name.casefold())
 
 
-def check_tree(root: Path) -> tuple[list[CategoryResult], int]:
+def check_tree(root: Path, *, addon_guards: CategoryResult | None = None) -> tuple[list[CategoryResult], int]:
     tree = SourceTree(root)
     results = _general_categories(tree)
     results.insert(1, _audio_category(tree))
     results.append(_high_risk_category(tree))
-    results.append(_addon_guard_category())
+    results.append(addon_guards if addon_guards is not None else _addon_guard_category())
     errors = sum(len(result.errors) for result in results)
     return results, errors
 
@@ -777,10 +850,11 @@ def main() -> int:
     if not trees:
         print("No NVDA source trees found.", file=sys.stderr)
         return 2
+    addon_guards = _addon_guard_category()
     total_errors = 0
     for root in trees:
         print(f"\n{root.name}: {root}")
-        results, errors = check_tree(root)
+        results, errors = check_tree(root, addon_guards=addon_guards)
         total_errors += errors
         for result in results:
             print(f"  [{'PASS' if not result.errors else 'FAIL'}] {result.name}")

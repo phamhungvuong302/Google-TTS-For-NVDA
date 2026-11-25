@@ -319,10 +319,10 @@
       "category": "locale-punctuation",
       "locale": "sat-IN",
       "operation": "sentenceUnits",
-      "text": "ᱟᱨᱤᱛᱚᱞ ᱡᱚᱞᱟᱨ. ᱡᱟᱦᱟᱢ ᱥᱟᱨᱤᱛᱚᱞ.",
+      "text": "ᱟᱨᱤᱛᱚᱞ ᱡᱚᱞᱟᱨ᱾ ᱡᱟᱦᱟᱢ ᱥᱟᱨᱤᱛᱚᱞ᱾",
       "expected": [
-        "ᱟᱨᱤᱛᱚᱞ ᱡᱚᱞᱟᱨ.",
-        "ᱡᱟᱦᱟᱢ ᱥᱟᱨᱤᱛᱚᱞ."
+        "ᱟᱨᱤᱛᱚᱞ ᱡᱚᱞᱟᱨ᱾",
+        "ᱡᱟᱦᱟᱢ ᱥᱟᱨᱤᱛᱚᱞ᱾"
       ]
     },
     {
@@ -330,10 +330,10 @@
       "category": "locale-punctuation",
       "locale": "mr-IN",
       "operation": "sentenceUnits",
-      "text": "हे पहिले वाक्य आहे. हे दुसरे वाक्य आहे.",
+      "text": "हे पहिले वाक्य आहे। हे दुसरे वाक्य आहे।",
       "expected": [
-        "हे पहिले वाक्य आहे.",
-        "हे दुसरे वाक्य आहे."
+        "हे पहिले वाक्य आहे।",
+        "हे दुसरे वाक्य आहे।"
       ]
     },
     {
@@ -518,7 +518,7 @@
       ]
     },
     {
-      "id": "hi-in-devanagari-long-no-space-text",
+      "id": "hi-in-devanagari-long-text",
       "category": "long-sentence",
       "locale": "hi-IN",
       "operation": "latencySegments",
@@ -535,7 +535,7 @@
       }
     },
     {
-      "id": "bn-in-bengali-long-no-space-text",
+      "id": "bn-in-bengali-long-text",
       "category": "long-sentence",
       "locale": "bn-IN",
       "operation": "latencySegments",

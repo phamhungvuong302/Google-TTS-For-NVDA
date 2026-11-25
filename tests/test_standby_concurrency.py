@@ -510,6 +510,55 @@ class StandbyRefreshLockSafetyTests(unittest.TestCase):
         standby = _load_standby_module()
         self.assertEqual("", standby._voice_for_language(bridge_module.VoiceCatalog([]), "fr-FR", "missing-voice"))
 
+    def test_run_refresh_replaces_unhealthy_bridge_and_clears_unready_bridge_on_cancel(self) -> None:
+        standby, mgr = _new_manager()
+        emptyCatalog = bridge_module.VoiceCatalog([])
+
+        # 1. Existing bridge with matching signature that became unhealthy must be terminated and replaced.
+        unhealthyBridge = _FakeBridge()
+        unhealthyBridge.safe_for_standby_release = lambda: False  # type: ignore[attr-defined]
+        unhealthyBridge.is_connected = lambda: False  # type: ignore[attr-defined]
+        freshBridge = _FakeBridge()
+        mgr._generation = 1
+        mgr._bridge = unhealthyBridge
+        mgr._signature = ("sig", 0)
+        mgr._ready = True
+
+        with (
+            mock.patch.object(standby, "keep_browser_runtime_ready_enabled", return_value=True),
+            mock.patch.object(standby, "DirectoryChangeWatcher", _FakeStandbyWatcher),
+            mock.patch.object(standby, "_installed_catalog", return_value=emptyCatalog),
+            mock.patch.object(standby, "_catalog_signature", return_value=("sig", 0)),
+            mock.patch.object(standby, "_warmup_options", return_value=[]),
+            mock.patch.object(standby, "ChromeTtsBridge", return_value=freshBridge),
+        ):
+            mgr._run_refresh(1, threading.Event(), "health check")
+
+        self.assertEqual(1, unhealthyBridge.terminate_calls)
+        self.assertIs(freshBridge, mgr._bridge)
+        self.assertTrue(mgr._ready)
+
+        # 2. If ensure_connection raises CdpCancelled on the current generation, the unready bridge is cleaned up.
+        _, mgrCancel = _new_manager()
+        mgrCancel._generation = 2
+        cancelledBridge = _FakeBridge()
+
+        def fail_cancel(cancelEvent: Any = None) -> None:
+            raise standby.CdpCancelled()
+
+        cancelledBridge.ensure_connection = fail_cancel  # type: ignore[method-assign]
+        with (
+            mock.patch.object(standby, "keep_browser_runtime_ready_enabled", return_value=True),
+            mock.patch.object(standby, "_installed_catalog", return_value=emptyCatalog),
+            mock.patch.object(standby, "_catalog_signature", return_value=("sig", 0)),
+            mock.patch.object(standby, "ChromeTtsBridge", return_value=cancelledBridge),
+        ):
+            mgrCancel._run_refresh(2, threading.Event(), "cancelled connect")
+
+        self.assertIsNone(mgrCancel._bridge)
+        self.assertFalse(mgrCancel._ready)
+        self.assertEqual(1, cancelledBridge.terminate_calls)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -334,6 +334,12 @@ class UpdateSizeLimitTests(unittest.TestCase):
             _updater.download_update(update)
         self.assertIn("too large", str(ctx.exception))
 
+    def test_non_positive_package_size_is_rejected(self) -> None:
+        for bad_size in (0, -10):
+            update = _make_update_info(size=bad_size)
+            with self.assertRaises(_updater.UpdateError):
+                _updater.download_update(update)
+
 
 # ---------------------------------------------------------------------------
 # Test 7: Version comparison
@@ -509,6 +515,15 @@ class ReleaseNotesTests(unittest.TestCase):
 
     def test_no_release_notes(self) -> None:
         self.assertEqual("", _updater._release_notes({}, None))
+
+    def test_case_insensitive_and_base_language_fallback(self) -> None:
+        data = {
+            "releaseNotesByLocale": {"zh_CN": "中文说明", "es": "Notas en español"},
+            "releaseNotes": "English",
+        }
+        self.assertEqual("中文说明", _updater._release_notes(data, "zh-cn"))
+        self.assertEqual("Notas en español", _updater._release_notes(data, "es_CO"))
+        self.assertEqual("English", _updater._release_notes(data, "fr-FR"))
 
 
 # ---------------------------------------------------------------------------

@@ -27,8 +27,12 @@ END_OF_UTTERANCE_RATE_FACTOR_MIN: float = 0.5
 END_OF_UTTERANCE_RATE_FACTOR_MAX: float = 1.6
 
 
-def interpolate_rate_factor(rate: int, table: tuple[tuple[int, float], ...] = BREAK_RATE_TABLE) -> float:
+def interpolate_rate_factor(rate: int | float, table: tuple[tuple[int, float], ...] = BREAK_RATE_TABLE) -> float:
     """Linear interpolation over a (rate, factor) lookup table."""
+    if not table:
+        return 1.0
+    if isinstance(rate, float) and not math.isfinite(rate):
+        return 1.0
     if rate <= table[0][0]:
         return table[0][1]
     if rate >= table[-1][0]:
@@ -37,6 +41,8 @@ def interpolate_rate_factor(rate: int, table: tuple[tuple[int, float], ...] = BR
         r0, f0 = table[i]
         r1, f1 = table[i + 1]
         if r0 <= rate <= r1:
+            if r1 == r0:
+                return f0
             t = (rate - r0) / (r1 - r0)
             return f0 + t * (f1 - f0)
     return table[-1][1]
@@ -74,35 +80,32 @@ def clamp_int(value: Any, default: int = 50, minimum: int = 0, maximum: int = 10
 
 def coerce_bool(value: Any, default: bool = False) -> bool:
     """Safely coerce a boolean, string flag, or None config value to bool."""
+    if isinstance(value, bool):
+        return value
     if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "yes", "on")
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return True
+        if normalized in ("0", "false", "no", "off"):
+            return False
+        return bool(default)
     if value is None:
-        return default
+        return bool(default)
     return bool(value)
-
-
-def _clamp_percent(value: Any, default: int = 50) -> int:
-    """Safely coerce an NVDA 0..100 slider value to a clamped integer."""
-    return clamp_int(value, default=default, minimum=0, maximum=100)
-
-
-def _coerce_bool(value: Any) -> bool:
-    """Safely coerce a boolean or string flag to bool."""
-    return coerce_bool(value, default=False)
 
 
 def rate_to_chrome(value: int, rateBoost: bool = False) -> float:
     """Convert an NVDA rate integer (0..100) into a Chromium TTS rate multiplier."""
-    percent = _clamp_percent(value, default=50) / 100.0
+    percent = clamp_int(value, default=50) / 100.0
     rate = 0.35 + (2.0 - 0.35) * percent
-    if _coerce_bool(rateBoost):
+    if coerce_bool(rateBoost):
         rate *= 2
     return round(max(0.1, min(10.0, rate)), 3)
 
 
 def pitch_to_chrome(pitch: int) -> float:
     """Convert an NVDA pitch integer (0..100) into a Chromium TTS pitch multiplier."""
-    pitchSemitones = -12.0 + 24.0 * _clamp_percent(pitch, default=50) / 100.0
+    pitchSemitones = -12.0 + 24.0 * clamp_int(pitch, default=50) / 100.0
     return round(max(0.1, min(3.0, 1.0 + pitchSemitones / 20.0)), 3)
 
 
@@ -122,10 +125,10 @@ def build_speech_options(
     rateBoost: bool = False,
 ) -> dict[str, Any]:
     """Calculate the full speech options dictionary for the WASM TTS engine and tempo processor."""
-    clampedRate = _clamp_percent(rate, default=50)
-    clampedPitch = _clamp_percent(pitch, default=50)
-    clampedVolume = _clamp_percent(volume, default=100)
-    rateBoostEnabled = _coerce_bool(rateBoost)
+    clampedRate = clamp_int(rate, default=50)
+    clampedPitch = clamp_int(pitch, default=50)
+    clampedVolume = clamp_int(volume, default=100)
+    rateBoostEnabled = coerce_bool(rateBoost)
     volumeLevel = max(0.0, min(1.0, clampedVolume / 100.0))
     outputGain = max(0.0, min(OUTPUT_GAIN_MAKEUP, volumeLevel * OUTPUT_GAIN_MAKEUP))
     desiredRate = rate_to_chrome(clampedRate, rateBoostEnabled)

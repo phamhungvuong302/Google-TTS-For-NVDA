@@ -238,6 +238,30 @@ class PcmProcessingThroughputTests(unittest.TestCase):
 
         self.assertLess(elapsed, 0.1, f"PCM processing took {elapsed:.3f}s")
 
+    def test_pcm_silence_shortener_multisecond_speech_fast_path(self) -> None:
+        """Processing 5s of 24kHz voiced audio with pauses should stay well under 50ms."""
+        processing = self.processing
+        sample_rate = 24000
+        # Simulate realistic speech with frequent zero-crossings + 200ms pauses (5s total).
+        voiced_block = _pcm(*(([0, 1200, 3500, 1200, 0, -1200, -3500, -1200]) * 300))  # 100ms
+        pause_block = _pcm(*([0] * 4800))  # 200ms
+        pcm = (voiced_block * 8 + pause_block) * 5  # 5.0s = 240,000 bytes
+        chunk_bytes = 4800  # 100ms chunks
+
+        start = time.perf_counter()
+        shortener = processing.create_pcm_silence_shortener(
+            processing.PAUSE_MODE_SHORTEN_ALL,
+            sample_rate,
+            keepSilenceMs=10,
+            noiseFloor=162,
+            minPauseTriggerMs=41,
+        )
+        for offset in range(0, len(pcm), chunk_bytes):
+            shortener.feed(pcm[offset : offset + chunk_bytes])
+        shortener.finish()
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        self.assertLess(elapsed_ms, 50.0, f"5s PCM shortening took {elapsed_ms:.1f}ms")
+
 
 if __name__ == "__main__":
     unittest.main()

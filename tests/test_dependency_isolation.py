@@ -93,6 +93,47 @@ class BundledDependencyIsolationTests(unittest.TestCase):
         self.assertTrue(websocketUtils.validate_utf8("Tiếng Việt".encode()))
         self.assertFalse(websocketUtils.validate_utf8(b"\xff"))
 
+    def test_vendored_websocket_proxy_info_honors_http_no_proxy_without_explicit_proxy_host(self) -> None:
+        import os
+        from unittest import mock
+
+        bridge = load_driver_module("bridge")
+        websocketPrefix = bridge.websocket.__name__
+        websocketHttp = sys.modules[f"{websocketPrefix}._http"]
+        websocketUrl = sys.modules[f"{websocketPrefix}._url"]
+        with mock.patch.dict(
+            os.environ,
+            {"HTTP_PROXY": "http://proxy.invalid:8080", "http_proxy": "http://proxy.invalid:8080"},
+            clear=False,
+        ):
+            os.environ.pop("NO_PROXY", None)
+            os.environ.pop("no_proxy", None)
+            noProxyInfo = websocketHttp.proxy_info(http_no_proxy=["127.0.0.1", "localhost", "::1"])
+            self.assertEqual(["127.0.0.1", "localhost", "::1"], noProxyInfo.no_proxy)
+            self.assertEqual(
+                (None, 0, None),
+                websocketUrl.get_proxy_info(
+                    "127.0.0.1",
+                    False,
+                    noProxyInfo.proxy_host,
+                    noProxyInfo.proxy_port,
+                    noProxyInfo.auth,
+                    noProxyInfo.no_proxy,
+                ),
+            )
+            defaultProxyInfo = websocketHttp.proxy_info()
+            self.assertEqual(
+                ("proxy.invalid", 8080, None),
+                websocketUrl.get_proxy_info(
+                    "127.0.0.1",
+                    False,
+                    defaultProxyInfo.proxy_host,
+                    defaultProxyInfo.proxy_port,
+                    defaultProxyInfo.auth,
+                    defaultProxyInfo.no_proxy,
+                ),
+            )
+
     def test_driver_internal_modules_use_package_relative_imports(self) -> None:
         self._assert_internal_modules_use_relative_imports(DRIVER_DIR, DRIVER_INTERNAL_MODULES)
 

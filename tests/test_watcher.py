@@ -307,7 +307,8 @@ class DirectoryChangeWatcherEdgeCaseTests(unittest.TestCase):
         cb = MagicMock()
         kernel32 = _make_mock_kernel32()
 
-        # All paths return invalid handles.
+        # All paths return invalid handles (clear side_effect set by helper first).
+        kernel32.FindFirstChangeNotificationW.side_effect = None
         kernel32.FindFirstChangeNotificationW.return_value = ctypes.c_void_p(-1).value
 
         with patch.object(ctypes, "WinDLL", return_value=kernel32):
@@ -319,6 +320,7 @@ class DirectoryChangeWatcherEdgeCaseTests(unittest.TestCase):
             w.stop()
 
         cb.assert_not_called()
+        kernel32.WaitForMultipleObjects.assert_not_called()
         self.assertIsNone(w._thread)
 
     def test_empty_paths_tuple_exits_thread(self) -> None:
@@ -339,10 +341,15 @@ class DirectoryChangeWatcherEdgeCaseTests(unittest.TestCase):
         """Every FindFirstChangeNotification handle is closed in the finally block."""
         cb = MagicMock()
         callback_fired = threading.Event()
+        calls = 0
 
         def _wait(*_args, **_kwargs):
-            callback_fired.set()
-            return 1  # notification → callback fires
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                callback_fired.set()
+                return 1  # notification → callback fires once
+            return 0  # stop event
 
         kernel32 = _make_mock_kernel32(wait_side_effect=_wait)
 
@@ -352,13 +359,43 @@ class DirectoryChangeWatcherEdgeCaseTests(unittest.TestCase):
                 cb,
             )
             w.start()
-            callback_fired.wait(timeout=2)
+            self.assertTrue(callback_fired.wait(timeout=2))
             w.stop()
 
-        self.assertGreaterEqual(
+        self.assertEqual(
             kernel32.FindCloseChangeNotification.call_count,
             1,
         )
+
+    def test_find_next_failure_closes_handle_and_re_registers_instead_of_spinning(self) -> None:
+        """If FindNextChangeNotification returns False, the loop closes handles instead of tight-looping."""
+        cb = MagicMock()
+        waits = 0
+        re_registered = threading.Event()
+
+        def _wait(*_args, **_kwargs):
+            nonlocal waits
+            waits += 1
+            if waits == 1:
+                return 1
+            re_registered.set()
+            return 0
+
+        kernel32 = _make_mock_kernel32(wait_side_effect=_wait)
+        kernel32.FindNextChangeNotification.side_effect = None
+        kernel32.FindNextChangeNotification.return_value = False
+
+        with patch.object(ctypes, "WinDLL", return_value=kernel32):
+            w = watcher_mod.DirectoryChangeWatcher(
+                lambda: (_REAL_DIR,),
+                cb,
+            )
+            w.start()
+            self.assertTrue(re_registered.wait(timeout=2))
+            w.stop()
+
+        self.assertEqual(2, kernel32.FindFirstChangeNotificationW.call_count)
+        self.assertEqual(2, kernel32.FindCloseChangeNotification.call_count)
 
     def test_close_handle_called_on_exit(self) -> None:
         """CloseHandle is called for the stop event when _run exits."""
@@ -483,6 +520,23 @@ class DirectoryChangeWatcherIntegrationTests(unittest.TestCase):
         time.sleep(0.2)
 
         cb.assert_not_called()
+
+
+class DirectoryChangeWatcherLoggingTests(unittest.TestCase):
+    """Verify watcher logs use NVDA logger compatibility including DEBUGWARNING."""
+
+    def test_wait_failure_logs_debug_warning(self) -> None:
+        fresh_watcher = load_fresh_driver_module("watcher")
+        kernel32 = _make_mock_kernel32(
+            wait_side_effect=lambda *_a, **_k: fresh_watcher.DirectoryChangeWatcher._WAIT_FAILED
+        )
+        w = fresh_watcher.DirectoryChangeWatcher(lambda: (_REAL_DIR,), lambda _r: None)
+        with (
+            patch.object(w, "_ensure_kernel32", return_value=kernel32),
+            self.assertLogs(fresh_watcher.log, level=15) as logs,
+        ):
+            w._run()
+        self.assertTrue(any("DEBUGWARNING" in entry and "wait failed" in entry for entry in logs.output))
 
 
 if __name__ == "__main__":

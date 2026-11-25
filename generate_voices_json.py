@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import ast
 import concurrent.futures
+import hashlib
 import io
 import json
 import re
@@ -108,7 +109,7 @@ def latest_engine_voices_json(engineRoot: Path | None = None) -> Path | None:
         return None
     candidates: list[tuple[tuple[tuple[int, int | str], ...], str, Path]] = []
     for directory in engineRoot.iterdir():
-        if not directory.is_dir():
+        if not directory.is_dir() or not ENGINE_VERSION_PATTERN.match(directory.name):
             continue
         voicesJson = directory / "voices.json"
         if voicesJson.is_file():
@@ -265,7 +266,7 @@ NATIVE_LANGUAGE_NAMES: dict[str, str] = {
     "es-es": "español",
     "uk-ua": "українська",
     "ur-pk": "اردو",
-    "ur-in": "اردو (ভারত)",
+    "ur-in": "اردو (بھارت)",
     "vi-vn": "Tiếng Việt",
     "cy-gb": "Cymraeg",
     "da-dk": "Dansk",
@@ -397,6 +398,37 @@ def _extract_speakers_blocks(text: str) -> list[str]:
     return blocks
 
 
+def _strip_textproto_comments(block: str) -> str:
+    out: list[str] = []
+    idx = 0
+    length = len(block)
+    in_string = False
+    escaped = False
+    while idx < length:
+        ch = block[idx]
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+            out.append(ch)
+        elif ch == "#":
+            newline = block.find("\n", idx)
+            if newline == -1:
+                break
+            out.append("\n")
+            idx = newline
+        else:
+            out.append(ch)
+        idx += 1
+    return "".join(out)
+
+
 def extract_speakers_from_textproto(content_bytes: bytes) -> list[tuple[str, str]]:
     try:
         text = content_bytes.decode("utf-8", errors="ignore")
@@ -407,8 +439,9 @@ def extract_speakers_from_textproto(content_bytes: bytes) -> list[tuple[str, str
     seen_speakers: set[str] = set()
 
     for block in _extract_speakers_blocks(text):
-        spk_match = re.search(r'\bspeaker:\s*"((?:\\.|[^"\\])*)"', block)
-        gen_match = re.search(r'\bgender:\s*"((?:\\.|[^"\\])*)"', block)
+        cleaned_block = _strip_textproto_comments(block)
+        spk_match = re.search(r'\bspeaker:\s*"((?:\\.|[^"\\])*)"', cleaned_block)
+        gen_match = re.search(r'\bgender:\s*"((?:\\.|[^"\\])*)"', cleaned_block)
         if spk_match:
             spk_code = spk_match.group(1).strip()
             gen_str = (gen_match.group(1).strip() if gen_match else "") or "female"
@@ -447,6 +480,27 @@ def _read_bounded_response_bytes(response: Any, max_bytes: int) -> bytes:
     return bytes(payload)
 
 
+def _https_get_with_verified_redirects(session: Any, url: str, *, max_redirects: int = 5) -> Any:
+    current_url = url
+    for _ in range(max_redirects + 1):
+        if not current_url.lower().startswith("https://"):
+            raise ValueError(f"Refusing non-HTTPS URL: {current_url!r}")
+        response = session.get(current_url, timeout=REQUEST_TIMEOUT, stream=True, allow_redirects=False)
+        status = getattr(response, "status_code", 0)
+        if status in (301, 302, 303, 307, 308):
+            headers = getattr(response, "headers", None)
+            location = headers.get("Location") if headers is not None and hasattr(headers, "get") else None
+            close_fn = getattr(response, "close", None)
+            if callable(close_fn):
+                close_fn()
+            if not isinstance(location, str) or not location.strip():
+                raise ValueError(f"Redirect response ({status}) missing Location header")
+            current_url = urllib.parse.urljoin(current_url, location.strip())
+            continue
+        return response
+    raise ValueError(f"Too many redirects (> {max_redirects}) for {url!r}")
+
+
 def fetch_new_package_speakers(
     session: requests.Session, pkg_info: dict[str, Any], all_packages_map: dict[str, dict[str, Any]]
 ) -> list[dict[str, str]] | None:
@@ -464,7 +518,7 @@ def fetch_new_package_speakers(
             with output_lock:
                 print(f"[FETCHING] {voice_id} ...", flush=True)
 
-            response = session.get(url, timeout=REQUEST_TIMEOUT, stream=True)
+            response = _https_get_with_verified_redirects(session, url)
             try:
                 final_url = getattr(response, "url", None)
                 if isinstance(final_url, str) and final_url and not final_url.lower().startswith("https://"):
@@ -477,6 +531,14 @@ def fetch_new_package_speakers(
                 close_fn = getattr(response, "close", None)
                 if callable(close_fn):
                     close_fn()
+
+            expected_sha256 = str(pkg_info.get("sha256Checksum") or "").strip().lower()
+            if expected_sha256:
+                actual_sha256 = hashlib.sha256(payload).hexdigest().lower()
+                if actual_sha256 != expected_sha256:
+                    raise ValueError(
+                        f"SHA-256 mismatch for {voice_id}: expected {expected_sha256}, got {actual_sha256}"
+                    )
 
             raw_speakers: list[tuple[str, str]] = []
 
@@ -494,11 +556,16 @@ def fetch_new_package_speakers(
                         raise ValueError("backend_pipeline.textproto exceeded size limit while reading")
                     raw_speakers = extract_speakers_from_textproto(textproto_bytes)
 
-            # If no textproto found (e.g. locomel binary compiled protobuf), inherit speaker codes from base multi package
+            # If no textproto found (e.g. locomel binary compiled protobuf), inherit speaker codes from its base package
             if not raw_speakers:
-                base_multi_id = f"{locale}-x-multi"
-                if base_multi_id in all_packages_map and "speakers" in all_packages_map[base_multi_id]:
-                    raw_speakers = [(s["speaker"], s["gender"]) for s in all_packages_map[base_multi_id]["speakers"]]
+                for base_id in (pkg_info.get("dependentVoiceId"), f"{locale}-x-multi"):
+                    if (
+                        isinstance(base_id, str)
+                        and base_id in all_packages_map
+                        and all_packages_map[base_id].get("speakers")
+                    ):
+                        raw_speakers = [(s["speaker"], s["gender"]) for s in all_packages_map[base_id]["speakers"]]
+                        break
 
             if not raw_speakers:
                 raise ValueError("No valid speakers found or inferred")
@@ -651,7 +718,7 @@ def main() -> None:
     merged_map: dict[str, dict[str, Any]] = {}
 
     # Step 1: Process items from source_packs
-    new_packages_to_fetch: list[dict[str, Any]] = []
+    new_packages_by_id: dict[str, dict[str, Any]] = {}
 
     for pack in source_packs:
         file_id = pack.get("name", "")
@@ -659,6 +726,10 @@ def main() -> None:
             continue
         # Derive voice_id by stripping revision suffix e.g. -r83
         voice_id = re.sub(r"-r\d+$", "", file_id)
+        if voice_id in merged_map and _version_sort_key(file_id) <= _version_sort_key(
+            str(merged_map[voice_id].get("fileId") or "")
+        ):
+            continue
         compressed_size = pack.get("compressed_size", 0)
         sha256_checksum = pack.get("sha256_checksum", "")
 
@@ -685,14 +756,22 @@ def main() -> None:
             entry["dependentVoiceId"] = dependent_voice_id
 
         existing_item = existing_entries.get(voice_id)
-        if existing_item is not None and "speakers" in existing_item and existing_item.get("fileId") == file_id:
+        existing_speakers = existing_item.get("speakers") if existing_item is not None else None
+        if (
+            existing_item is not None
+            and isinstance(existing_speakers, list)
+            and existing_speakers
+            and existing_item.get("fileId") == file_id
+        ):
             # Preserve existing speakers array when package revision is unchanged
-            entry["speakers"] = existing_item["speakers"]
+            entry["speakers"] = existing_speakers
             merged_map[voice_id] = entry
+            new_packages_by_id.pop(voice_id, None)
         else:
             merged_map[voice_id] = entry
-            new_packages_to_fetch.append(entry)
+            new_packages_by_id[voice_id] = entry
 
+    new_packages_to_fetch = list(new_packages_by_id.values())
     print(f"\n{len(merged_map) - len(new_packages_to_fetch)} packages already have speaker metadata.")
     print(f"Fetching speaker metadata for {len(new_packages_to_fetch)} new packages concurrently...\n")
 
@@ -702,22 +781,22 @@ def main() -> None:
             for vid, item in existing_entries.items()
             if isinstance(item.get("speakers"), list) and item["speakers"]
         }
-        base_multi_packages = [pkg for pkg in new_packages_to_fetch if pkg["id"].endswith("-x-multi")]
-        dependent_packages = [pkg for pkg in new_packages_to_fetch if not pkg["id"].endswith("-x-multi")]
+        base_packages = [pkg for pkg in new_packages_to_fetch if not pkg.get("dependentVoiceId")]
+        dependent_packages = [pkg for pkg in new_packages_to_fetch if pkg.get("dependentVoiceId")]
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             wave1_snapshot = {
-                vid: {"speakers": list(item["speakers"])} for vid, item in merged_map.items() if "speakers" in item
+                vid: {"speakers": list(item["speakers"])} for vid, item in merged_map.items() if item.get("speakers")
             }
             _fetch_speaker_wave(
                 requests.Session,
                 executor,
-                base_multi_packages,
+                base_packages,
                 wave1_snapshot,
                 merged_map,
                 fallback_speakers,
             )
             wave2_snapshot = {
-                vid: {"speakers": list(item["speakers"])} for vid, item in merged_map.items() if "speakers" in item
+                vid: {"speakers": list(item["speakers"])} for vid, item in merged_map.items() if item.get("speakers")
             }
             _fetch_speaker_wave(
                 requests.Session,

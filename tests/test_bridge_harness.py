@@ -144,6 +144,7 @@ def _run_harness_js(scriptBody: str, *, timeout: float = 10.0) -> Any:
         [NODE_EXECUTABLE or "node", "-", str(Path(HARNESS_PATH))],
         input=fullScript,
         text=True,
+        encoding="utf-8",
         capture_output=True,
         timeout=timeout,
         check=False,
@@ -711,7 +712,7 @@ class BridgeHarnessRuntimeTests(unittest.TestCase):
         self.assertEqual({"success": True}, result["r2"])
 
     def test_wsola_covers_low_male_pitch_periods_and_decoupled_extremes(self) -> None:
-        """Upgraded WSOLA must maintain periodic waveform continuity on low male F0 (115 Hz) across extreme rates/pitches."""
+        """WSOLA tempo processing must maintain periodic waveform continuity on low F0 (115 Hz) across extreme rates/pitches."""
         result = _run_harness_js(
             """
             async function runLowMaleCase(artificialRate, postPitch) {
@@ -726,7 +727,7 @@ class BridgeHarnessRuntimeTests(unittest.TestCase):
                                 const buf = new ctx.Float32Array(n);
                                 for (let j = 0; j < n; j++) {
                                     const t = (off + j) / 24000;
-                                    // Rich harmonic glottal-like male voice wave @ 115 Hz
+                                    // Multi-harmonic periodic test wave @ 115 Hz
                                     buf[j] = 0.22 * Math.sin(2 * Math.PI * 115 * t)
                                         + 0.14 * Math.sin(2 * Math.PI * 230 * t + 0.4)
                                         + 0.08 * Math.sin(2 * Math.PI * 345 * t + 0.9);
@@ -1058,6 +1059,148 @@ class BridgeHarnessRuntimeTests(unittest.TestCase):
         self.assertEqual(4800 + 480, result["emojiMarks"][2]["sampleOffset"])
         self.assertEqual([], result["suppressedMarks"])
         self.assertEqual([4], [m["charIndex"] for m in result["fallbackMarks"]])
+
+    def test_missing_bridge_binding_rejects_cleanly_and_finally_resets_gain_and_marks(self) -> None:
+        result = _run_harness_js(
+            """
+            // 1. Missing window.googleTtsForNvdaBridge rejects cleanly without throwing inside emit().
+            const ctx1 = createHarnessContext({ googleTtsForNvdaBridge: undefined });
+            createFakeEngine(ctx1, { sampleLength: 64, fillValue: 0.25 });
+            let missingErr = null;
+            try {
+                await speakWithDefaults(ctx1, { sessionId: "s-nobinding", text: "hello" });
+            } catch (err) {
+                missingErr = err.message;
+            }
+
+            // 2. Synchronous error event during onSpeak aborts before scheduling worklet empty.
+            const ctx2 = createHarnessContext();
+            let emptyNotified = 0;
+            const worklet2 = new ctx2.AudioWorkletNode();
+            worklet2.port.onmessage = (evt) => {
+                if (evt && evt.data && evt.data.type === "empty") {
+                    emptyNotified++;
+                }
+            };
+            createFakeEngine(ctx2, {
+                workletNode: worklet2,
+                onSpeak: async (_text, _opts, utteranceId, engine) => {
+                    worklet2.port.postMessage({
+                        command: "addBuffer",
+                        buffer: new ctx2.Float32Array(32).fill(0.2),
+                    });
+                    emitEndEvent(ctx2, engine, { type: "error", utteranceId, errorMessage: "sync wasm failure" });
+                },
+            });
+            let syncErr = null;
+            try {
+                await speakWithDefaults(ctx2, { sessionId: "s-sync-err", text: "fail fast" });
+            } catch (err) {
+                syncErr = err.message;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 25));
+
+            // 3. Cancelled multi-segment speak resets outputGain and markOffset for the next utterance.
+            const ctx3 = createHarnessContext();
+            let speakNum = 0;
+            createFakeEngine(ctx3, {
+                onSpeak: async (_text, _opts, utteranceId, engine, workletNode) => {
+                    speakNum++;
+                    engine.M = true;
+                    if (speakNum === 1) {
+                        setTimeout(() => {
+                            workletNode.port.postMessage({
+                                command: "addBuffer",
+                                buffer: new ctx3.Float32Array(128).fill(0.2),
+                            });
+                            emitEndEvent(ctx3, engine, { type: "end", utteranceId });
+                        }, 2);
+                    } else if (speakNum === 2) {
+                        setTimeout(() => {
+                            ctx3.googleTtsForNvdaStop();
+                        }, 2);
+                    } else {
+                        setTimeout(() => {
+                            workletNode.port.postMessage({
+                                command: "addBuffer",
+                                buffer: new ctx3.Float32Array(128).fill(0.4),
+                            });
+                            ctx3.chrome.runtime.sendMessage({
+                                type: "offscreenTtsEventResponse",
+                                event: { type: "word", utteranceId, charIndex: 0, length: 2 },
+                            });
+                            emitEndEvent(ctx3, engine, { type: "end", utteranceId });
+                        }, 2);
+                    }
+                },
+            });
+            const cancelledRes = await speakWithDefaults(ctx3, {
+                sessionId: "s-cancel-seg",
+                segments: ["first ", "second"],
+                outputGain: 0.25,
+            });
+            const nextRes = await speakWithDefaults(ctx3, {
+                sessionId: "s-after-cancel",
+                text: "ok",
+            });
+            const nextMarks = ctx3.events
+                .filter((e) => e.sessionId === "s-after-cancel" && e.type === "mark")
+                .map((e) => e.charIndex);
+            return { missingErr, syncErr, emptyNotified, cancelledRes, nextRes, nextMarks };
+            """
+        )
+        self.assertIn("googleTtsForNvdaBridge is not available", result["missingErr"] or "")
+        self.assertEqual("sync wasm failure", result["syncErr"])
+        self.assertEqual(0, result["emptyNotified"])
+        self.assertTrue(result["cancelledRes"].get("cancelled"))
+        self.assertEqual({"success": True}, result["nextRes"])
+        self.assertEqual([0], result["nextMarks"])
+
+    def test_error_event_clears_worklet_timer_ignores_trailing_end_and_stops_audio_intake(self) -> None:
+        result = _run_harness_js(
+            """
+            const ctx = createHarnessContext();
+            let emptyCallbacks = 0;
+            const worklet = new ctx.AudioWorkletNode();
+            worklet.port.onmessage = (evt) => {
+                if (evt && evt.data && evt.data.type === "empty") {
+                    emptyCallbacks++;
+                }
+            };
+            createFakeEngine(ctx, {
+                workletNode: worklet,
+                onSpeak: async (_text, _opts, utteranceId, engine) => {
+                    engine.M = true;
+                    setTimeout(() => {
+                        ctx.chrome.runtime.sendMessage({
+                            type: "offscreenTtsEventResponse",
+                            event: { type: "error", utteranceId, errorMessage: "late wasm crash" },
+                        });
+                        // Trailing addBuffer and end event after error must be ignored.
+                        worklet.port.postMessage({
+                            command: "addBuffer",
+                            buffer: new ctx.Float32Array(256).fill(0.5),
+                        });
+                        emitEndEvent(ctx, engine, { type: "end", utteranceId });
+                    }, 3);
+                },
+            });
+            let caughtMessage = null;
+            try {
+                await speakWithDefaults(ctx, { sessionId: "s-err-trail", text: "boom" });
+            } catch (err) {
+                caughtMessage = err.message;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            const audioEvents = ctx.events.filter((e) => e.sessionId === "s-err-trail" && e.type === "audio").length;
+            const doneEvents = ctx.events.filter((e) => e.sessionId === "s-err-trail" && e.type === "done").length;
+            return { caughtMessage, emptyCallbacks, audioEvents, doneEvents };
+            """
+        )
+        self.assertEqual("late wasm crash", result["caughtMessage"])
+        self.assertEqual(0, result["emptyCallbacks"])
+        self.assertEqual(0, result["audioEvents"])
+        self.assertEqual(0, result["doneEvents"])
 
 
 if __name__ == "__main__":

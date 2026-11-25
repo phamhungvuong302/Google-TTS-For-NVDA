@@ -483,9 +483,9 @@ class FormatNormalizationTableTests(unittest.TestCase):
         result = generate_unicode_data._format_normalization_table(table)
         lines = result.strip().split("\n")
         self.assertEqual(3, len(lines))
-        self.assertIn("0x0041: 'A'", lines[0])
-        self.assertIn("0x00A0: ' '", lines[1])
-        self.assertIn("0x00A9: '(C)'", lines[2])
+        self.assertIn('0x0041: "A"', lines[0])
+        self.assertIn('0x00A0: " "', lines[1])
+        self.assertIn('0x00A9: "(C)"', lines[2])
 
 
 class BuildNormalizationTableTests(unittest.TestCase):
@@ -597,8 +597,47 @@ class RenderModuleTests(unittest.TestCase):
             normalizationTable={0x00A0: " ", 0x00A9: "(C)"},
         )
         self.assertIn("NORMALIZATION_TABLE: dict[int, str] = {", result)
-        self.assertIn("0x00A0: ' '", result)
-        self.assertIn("0x00A9: '(C)'", result)
+        self.assertIn('0x00A0: " "', result)
+        self.assertIn('0x00A9: "(C)"', result)
+
+    def test_cldr_region_casing_and_exemplar_group_escapes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            voices_path = root / "voices.json"
+            voices_path.write_text(
+                '[{"id": "sd-in-x-multi", "speakers": [{"speaker": "s1"}]}]',
+                encoding="utf-8",
+            )
+            self.assertEqual({"sd_IN"}, generate_unicode_data._supported_locales(voices_path))
+
+            cldrCommon = root / "common"
+            supp = cldrCommon / "supplemental"
+            supp.mkdir(parents=True)
+            (supp / "likelySubtags.xml").write_text(
+                "<supplementalData><likelySubtags>"
+                '<likelySubtag from="sd" to="sd_Arab_PK"/>'
+                '<likelySubtag from="sd_IN" to="sd_Deva_IN"/>'
+                "</likelySubtags></supplementalData>",
+                encoding="utf-8",
+            )
+            (supp / "supplementalMetadata.xml").write_text(
+                "<supplementalData><metadata><alias/></metadata></supplementalData>",
+                encoding="utf-8",
+            )
+            (supp / "supplementalData.xml").write_text(
+                "<supplementalData><languageData/><parentLocales/></supplementalData>",
+                encoding="utf-8",
+            )
+            likelyScripts = generate_unicode_data._likely_scripts(supp / "likelySubtags.xml")
+            scripts = generate_unicode_data._supported_language_scripts(
+                ["sd_IN"],
+                likelyScripts,
+                {"Arab": "Arabic", "Deva": "Devanagari"},
+            )
+            self.assertEqual(("Devanagari",), scripts["sd"])
+
+            parsed = generate_unicode_data._parse_cldr_exemplar_set(r"[a {\u00E9} {\U000000F1}]")
+            self.assertEqual({"\u00e9", "\u00f1"}, parsed)
 
 
 class ConfiguredVoicesJsonTests(unittest.TestCase):

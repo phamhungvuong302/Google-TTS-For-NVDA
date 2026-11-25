@@ -247,6 +247,23 @@ class DependentVoiceIdTests(unittest.TestCase):
             with self.subTest(package_id=package_id):
                 self.assertEqual(expected, generate_voices_json.dependent_voice_id_for_package(package_id))
 
+    def test_textproto_comments_language_names_and_https_guard(self) -> None:
+        self.assertEqual("اردو (بھارت)", generate_voices_json.NATIVE_LANGUAGE_NAMES["ur-in"])
+        stripped = generate_voices_json._strip_textproto_comments(
+            'voice_id: "a#b" # trailing comment\n# comment line\nname: "x\\"y#z"\n'
+        )
+        self.assertIn('voice_id: "a#b"', stripped)
+        self.assertNotIn("trailing comment", stripped)
+        self.assertNotIn("comment line", stripped)
+        self.assertIn('name: "x\\"y#z"', stripped)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_engine(root, "backup")
+            valid_dir = _write_engine(root, "20260820.1")
+            self.assertEqual(valid_dir / "voices.json", generate_voices_json.latest_engine_voices_json(root))
+        with self.assertRaises(ValueError):
+            generate_voices_json._https_get_with_verified_redirects(mock.MagicMock(), "http://example.com/file.zvoice")
+
 
 if __name__ == "__main__":
     unittest.main()

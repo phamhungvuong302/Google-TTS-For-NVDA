@@ -53,6 +53,36 @@ class SafeJoinTests(unittest.TestCase):
         result = bridge._safe_join(self._root, "clean/path")
         self.assertTrue(result.resolve().is_relative_to(self._root.resolve()))
 
+    def test_rejects_null_byte_and_encoded_null(self) -> None:
+        for badPath in ("foo\x00bar", "voices/%00evil", "%00"):
+            with self.subTest(badPath=badPath):
+                result = bridge._safe_join(self._root, badPath)
+                self.assertEqual((self._root / "__invalid__").resolve(), result)
+
+    def test_bridge_http_headers_and_reuse_address_policy(self) -> None:
+        import os
+
+        self.assertEqual(os.name != "nt", bridge._ThreadingTcpServer.allow_reuse_address)
+
+        def collect_headers(requestPath: str) -> dict[str, str]:
+            sent: dict[str, str] = {}
+            handler = bridge._BridgeRequestHandler.__new__(bridge._BridgeRequestHandler)
+            handler.path = requestPath
+            handler.request_version = "HTTP/1.1"
+            handler.send_header = lambda name, value: sent.__setitem__(name, value)  # type: ignore[method-assign]
+            handler.flush_headers = lambda: None  # type: ignore[method-assign]
+            handler._headers_buffer = []
+            bridge._BridgeRequestHandler.end_headers(handler)
+            return sent
+
+        for noStorePath in ("/", "/index.html", "/voices.json", "/bridgeHarness.js", "/voices.json?v=1"):
+            headers = collect_headers(noStorePath)
+            self.assertEqual("no-store", headers.get("Cache-Control"), noStorePath)
+            self.assertEqual("same-origin", headers.get("Cross-Origin-Opener-Policy"))
+            self.assertEqual("require-corp", headers.get("Cross-Origin-Embedder-Policy"))
+        engineHeaders = collect_headers("/engine/bindings_main.wasm")
+        self.assertNotIn("Cache-Control", engineHeaders)
+
 
 # ---------------------------------------------------------------------------
 # _normalize_browser_runtime
@@ -174,6 +204,15 @@ class RuntimeRecycleClassificationTests(unittest.TestCase):
 
     def test_generic_exception_requires_recycle(self) -> None:
         self.assertTrue(bridge._runtime_error_requires_recycle(RuntimeError("oops")))
+
+    def test_wasm_preload_timeout_and_missing_binding_require_recycle(self) -> None:
+        for detail in (
+            "Error: Timed out waiting for WASM engine synthesis to complete.",
+            "Error: CDP bridge binding googleTtsForNvdaBridge is not available.",
+        ):
+            with self.subTest(detail=detail):
+                error = bridge.CdpError("runtime error", detail)
+                self.assertTrue(bridge._runtime_error_requires_recycle(error))
 
 
 # ---------------------------------------------------------------------------
@@ -669,7 +708,7 @@ class BrowserProcessManagerSpawnTests(unittest.TestCase):
             pm._start_browser_choice("chrome", "placeholder_browser.exe")
         return pm, profile_dir, mock_popen
 
-    def test_start_browser_choice_passes_devnull_handles(self) -> None:
+    def test_start_browser_choice_passes_isolated_stdio_handles(self) -> None:
         import subprocess
         import tempfile
 
@@ -679,9 +718,10 @@ class BrowserProcessManagerSpawnTests(unittest.TestCase):
             pos_args, kwargs = mock_popen.call_args
             launch_args = pos_args[0]
             self.assertFalse(any(str(arg).startswith("--remote-allow-origins") for arg in launch_args))
+            self.assertIn("--no-proxy-server", launch_args)
             self.assertEqual(subprocess.DEVNULL, kwargs.get("stdin"))
             self.assertEqual(subprocess.DEVNULL, kwargs.get("stdout"))
-            self.assertEqual(subprocess.DEVNULL, kwargs.get("stderr"))
+            self.assertEqual(subprocess.PIPE, kwargs.get("stderr"))
 
     def test_cdp_client_connect_suppresses_origin_header(self) -> None:
         from unittest.mock import MagicMock, patch
@@ -720,6 +760,380 @@ class BrowserProcessManagerSpawnTests(unittest.TestCase):
 
             self.assertEqual([False], stop_calls)
             self.assertTrue(Path(temp_dir).exists())
+
+    def test_get_browser_profile_dir_switches_between_persistent_and_temporary(self) -> None:
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pm = bridge.BrowserProcessManager(catalog=bridge.VoiceCatalog([]))
+            with patch.object(pm, "_browser_profile_root", return_value=root):
+                persistentDir = pm._get_browser_profile_dir("chrome", usePersistentProfile=True)
+                self.assertTrue(pm._profileIsPersistent)
+                lockFile = persistentDir / "lockfile"
+                lockFile.write_text("locked", encoding="utf-8")
+
+                tempDir = pm._get_browser_profile_dir("chrome", usePersistentProfile=False)
+                self.assertFalse(pm._profileIsPersistent)
+                self.assertNotEqual(persistentDir, tempDir)
+                self.assertTrue(tempDir.name.startswith("session-"))
+                # Switching persistent -> temporary must not unlink another process's lockfile.
+                self.assertTrue(lockFile.exists())
+
+                pm._release_chrome_profile()
+                self.assertFalse(tempDir.exists())
+
+    def test_get_page_websocket_url_matches_trailing_slash_and_index_html(self) -> None:
+        from unittest.mock import patch
+
+        pm = bridge.BrowserProcessManager(catalog=bridge.VoiceCatalog([]))
+        pm._serverPort = 8080
+        pm._debugPort = 9222
+        for candidateUrl in (
+            "http://127.0.0.1:8080",
+            "http://127.0.0.1:8080/",
+            "http://127.0.0.1:8080/index.html",
+        ):
+            with self.subTest(candidateUrl=candidateUrl):
+                targets = [
+                    {"type": "page", "url": "about:blank", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/blank"},
+                    {"type": "page", "url": candidateUrl, "webSocketDebuggerUrl": "ws://127.0.0.1:9222/bridge"},
+                ]
+                with patch.object(bridge, "_read_json_endpoint", return_value=targets):
+                    self.assertEqual("ws://127.0.0.1:9222/bridge", pm.get_page_websocket_url())
+
+    def test_startup_stderr_capture_caps_bytes_and_ignores_non_byte_mocks(self) -> None:
+        import io
+        from unittest.mock import MagicMock
+
+        longPayload = (b"noise\r\n" * 800) + b"FATAL: policy blocked headless mode\r\n"
+        capture = bridge._StartupStderrCapture(io.BytesIO(longPayload))
+        formatted = capture.wait_and_format(timeout=2.0)
+        self.assertTrue(formatted.startswith("..."))
+        self.assertIn("FATAL: policy blocked headless mode", formatted)
+        self.assertLessEqual(len(formatted), bridge._STARTUP_STDERR_SNIPPET_MAX_CHARS)
+        capture.clear()
+        self.assertEqual("", capture.wait_and_format(timeout=0.1))
+
+        # Mock stream returning non-bytes must exit immediately without closing or looping.
+        mockStream = MagicMock()
+        mockCapture = bridge._StartupStderrCapture(mockStream)
+        self.assertEqual("", mockCapture.wait_and_format(timeout=2.0))
+        self.assertTrue(mockCapture._finished.is_set())
+        mockStream.close.assert_not_called()
+
+    def test_startup_stderr_capture_utf8_ansi_error_close_and_thread_cancel(self) -> None:
+        import io
+        import os
+        import subprocess
+        import sys
+        import time
+        from unittest.mock import MagicMock, patch
+
+        # 1. Ring-buffer truncation mid-UTF-8 multi-byte char + ANSI CSI/OSC/BOM/NUL/C1 sanitization.
+        utf8Prefix = "Tiếng Việt ".encode() * 6  # multi-byte UTF-8
+        tail = b"\xef\xbb\xbf\x1b]0;win\x07\x1b[31mERROR\x1b[0m\x00\x7f  boom\r\n"
+        capUtf8 = bridge._StartupStderrCapture(io.BytesIO(utf8Prefix + tail), maxBytes=len(tail) + 5)
+        formatted = capUtf8.wait_and_format(timeout=2.0)
+        self.assertTrue(formatted.startswith("..."))
+        self.assertNotIn("\ufffd", formatted)
+        self.assertNotIn("\ufeff", formatted)
+        self.assertNotIn("\x1b", formatted)
+        self.assertNotIn("[31m", formatted)
+        self.assertNotIn("win", formatted)
+        self.assertIn("ERROR boom", formatted)
+
+        # 2. First-read OSError on a real io.IOBase stream still closes the stream.
+        class _FailingStream(io.RawIOBase):
+            def __init__(self) -> None:
+                self.close_calls = 0
+
+            def read(self, size: int = -1) -> bytes:
+                raise OSError("pipe broken on first read")
+
+            def close(self) -> None:
+                self.close_calls += 1
+                super().close()
+
+        failing = _FailingStream()
+        capFail = bridge._StartupStderrCapture(failing)
+        self.assertEqual("", capFail.wait_and_format(timeout=2.0))
+        self.assertTrue(capFail._finished.is_set())
+        self.assertGreaterEqual(failing.close_calls, 1)
+
+        # 3. Thread-start failure closes io.IOBase stream and never crashes or hangs.
+        unstarted = _FailingStream()
+        with patch.object(bridge.threading.Thread, "start", side_effect=RuntimeError("no threads")):
+            capNoThread = bridge._StartupStderrCapture(unstarted)
+        self.assertTrue(capNoThread._finished.is_set())
+        self.assertEqual("", capNoThread.wait_and_format(timeout=2.0))
+        self.assertGreaterEqual(unstarted.close_calls, 1)
+
+        # 4. After clear(), wait_and_format returns immediately without waiting for timeout.
+        class _BlockingStream(io.RawIOBase):
+            def __init__(self) -> None:
+                self.unblock = bridge.threading.Event()
+
+            def read(self, size: int = -1) -> bytes:
+                self.unblock.wait(timeout=5.0)
+                return b""
+
+        blocking = _BlockingStream()
+        capClear = bridge._StartupStderrCapture(blocking)
+        try:
+            capClear.clear()
+            t0 = time.monotonic()
+            self.assertEqual("", capClear.wait_and_format(timeout=2.0))
+            self.assertLess(time.monotonic() - t0, 0.5)
+        finally:
+            blocking.unblock.set()
+            capClear.close()
+
+        # 5. On Windows, close() unblocks a lingering subprocess stderr pipe via CancelSynchronousIo.
+        if os.name == "nt":
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys, time; sys.stderr.buffer.write(b'still-open\\n'); sys.stderr.buffer.flush(); time.sleep(10)",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                capLive = bridge._StartupStderrCapture(proc.stderr)
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and not capLive.wait_and_format(timeout=0.0):
+                    time.sleep(0.02)
+                self.assertIn("still-open", capLive.wait_and_format(timeout=0.0))
+                capLive.close()
+                self.assertTrue(capLive._finished.is_set())
+                assert proc.stderr is not None
+                self.assertTrue(proc.stderr.closed)
+            finally:
+                proc.kill()
+                proc.wait(timeout=2)
+
+        # 6. ensure_connection() preserves startup stderr if wait_until_ready() fails and clears once ready.
+        pm = bridge.BrowserProcessManager(catalog=bridge.VoiceCatalog([]))
+        pm._stderrCapture = bridge._StartupStderrCapture(io.BytesIO(b"FATAL: wasm crash during init\r\n"))
+        pm._stderrCapture._finished.wait(timeout=2.0)
+        pm._chromeProcess = MagicMock()
+        pm._chromeProcess.poll.return_value = 1
+        pm._profileRuntime = bridge.BROWSER_RUNTIME_CHROME
+
+        b = bridge.ChromeTtsBridge.__new__(bridge.ChromeTtsBridge)
+        b._lock = bridge.threading.RLock()
+        b._connectionLock = bridge.threading.Lock()
+        b._engineRefLock = bridge.threading.Lock()
+        b._lifecycleEpoch = 0
+        b._process_manager = pm
+        b._cdp_client = MagicMock()
+        b._cdp_client.is_connected.return_value = False
+        b._engine = MagicMock()
+        b._engine.wait_until_ready.side_effect = bridge.CdpError("not ready", "harness timed out")
+        with (
+            patch.object(pm, "start_and_get_websocket_url", return_value="ws://127.0.0.1:9222/page"),
+            patch.object(bridge, "_browser_choices", return_value=()),
+            self.assertRaises(bridge.CdpError) as errCtx,
+        ):
+            b.ensure_connection()
+        self.assertIn("FATAL: wasm crash during init", errCtx.exception.technicalDetail or "")
+        self.assertIsNone(pm._stderrCapture)
+
+        # 7. ensure_connection() attaches stderr onto non-CdpError (e.g. OSError from cdpClient.connect)
+        #    and still cleans up even if startup_stderr_snippet raises.
+        pm2 = bridge.BrowserProcessManager(catalog=bridge.VoiceCatalog([]))
+        pm2._stderrCapture = bridge._StartupStderrCapture(io.BytesIO(b"ERROR: socket closed\r\n"))
+        pm2._stderrCapture._finished.wait(timeout=2.0)
+        pm2._chromeProcess = MagicMock()
+        pm2._chromeProcess.poll.return_value = 1
+        pm2._profileRuntime = bridge.BROWSER_RUNTIME_CHROME
+        b._process_manager = pm2
+        b._cdp_client = MagicMock()
+        b._cdp_client.is_connected.return_value = False
+        b._cdp_client.connect.side_effect = OSError("connection refused")
+        with (
+            patch.object(pm2, "start_and_get_websocket_url", return_value="ws://127.0.0.1:9222/page"),
+            patch.object(bridge, "_browser_choices", return_value=()),
+            self.assertRaises(OSError) as osErrCtx,
+        ):
+            b.ensure_connection()
+        self.assertIn("ERROR: socket closed", getattr(osErrCtx.exception, "technicalDetail", ""))
+        self.assertIn("connection refused", getattr(osErrCtx.exception, "technicalDetail", ""))
+        self.assertIsNone(pm2._stderrCapture)
+
+        pm3 = bridge.BrowserProcessManager(catalog=bridge.VoiceCatalog([]))
+        pm3._profileRuntime = bridge.BROWSER_RUNTIME_CHROME
+        b._process_manager = pm3
+        b._cdp_client = MagicMock()
+        b._cdp_client.is_connected.return_value = False
+        b._cdp_client.connect.side_effect = RuntimeError("original connect failure")
+        with (
+            patch.object(pm3, "start_and_get_websocket_url", return_value="ws://127.0.0.1:9222/page"),
+            patch.object(pm3, "startup_stderr_snippet", side_effect=RuntimeError("stderr probe failed")),
+            patch.object(pm3, "terminate") as terminateMock,
+            patch.object(bridge, "_browser_choices", return_value=()),
+            self.assertRaisesRegex(RuntimeError, "original connect failure"),
+        ):
+            b.ensure_connection()
+        b._cdp_client.close.assert_called_once()
+        terminateMock.assert_called_once()
+
+        # 8. _reset_browser_process_state closes raw io.IOBase proc.stderr if _stderrCapture was never attached.
+        orphanStream = io.BytesIO(b"orphan")
+        pm4 = bridge.BrowserProcessManager(catalog=bridge.VoiceCatalog([]))
+        pm4._chromeProcess = SimpleNamespace(poll=lambda: 0, stderr=orphanStream)  # type: ignore[assignment]
+        pm4._stderrCapture = None
+        pm4._reset_browser_process_state()
+        self.assertTrue(orphanStream.closed)
+
+    def test_read_devtools_port_records_runtime_profile_and_stderr_on_temp_exit_zero(self) -> None:
+        import io
+        import tempfile
+        from unittest.mock import MagicMock
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pm = bridge.BrowserProcessManager(catalog=bridge.VoiceCatalog([]))
+            pm._profileDir = Path(temp_dir)
+            pm._profileRuntime = bridge.BROWSER_RUNTIME_EDGE
+            pm._profileIsPersistent = False
+            proc = MagicMock()
+            proc.poll.return_value = 0
+            proc.returncode = 0
+            pm._chromeProcess = proc
+            pm._stderrCapture = bridge._StartupStderrCapture(
+                io.BytesIO(b"ERROR:headless_shell.cc(123)] DevTools blocked by policy\r\n")
+            )
+
+            with self.assertRaises(bridge.CdpError) as ctx:
+                pm._read_devtools_port(Path(temp_dir) / "DevToolsActivePort")
+
+            self.assertEqual(
+                "The Chromium browser runtime closed before Google TTS For NVDA was ready.",
+                str(ctx.exception),
+            )
+            detail = ctx.exception.technicalDetail or ""
+            self.assertIn("Microsoft Edge", detail)
+            self.assertIn("temporary profile", detail)
+            self.assertIn(": 0", detail)
+            self.assertIn("DevTools blocked by policy", detail)
+
+    def test_start_browser_choice_preserves_persistent_failure_when_temporary_fails(self) -> None:
+        import tempfile
+        from unittest.mock import MagicMock, patch
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pm = bridge.BrowserProcessManager(catalog=bridge.VoiceCatalog([]))
+            pm._serverPort = 8080
+            profileDir = Path(temp_dir)
+            persistentErr = bridge._browser_profile_in_use_error(0, context="Google Chrome, persistent profile")
+            tempErr = bridge._friendly_cdp_error(
+                "The Chromium browser runtime closed before Google TTS For NVDA was ready.",
+                "Chromium browser runtime (Google Chrome, temporary profile) exited before DevTools became available: 0",
+            )
+            mockProc = MagicMock()
+            mockProc.pid = 4321
+            mockProc.stderr = None
+
+            def _get_profile(runtime: str, usePersistentProfile: bool = True, cancelEvent: Any = None) -> Path:
+                pm._profileDir = profileDir
+                pm._profileRuntime = runtime
+                pm._profileIsPersistent = usePersistentProfile
+                return profileDir
+
+            with (
+                patch.object(pm, "_get_browser_profile_dir", side_effect=_get_profile),
+                patch.object(pm, "_page_url", return_value="http://127.0.0.1:8080/index.html"),
+                patch.object(pm, "_read_devtools_port", side_effect=[persistentErr, tempErr]),
+                patch.object(pm, "_stop_browser_process"),
+                patch.object(bridge, "_hide_chrome_windows"),
+                patch.object(bridge, "_elevate_chrome_priority"),
+                patch("subprocess.Popen", return_value=mockProc),
+                self.assertRaises(bridge.CdpError) as ctx,
+            ):
+                pm._start_browser_choice("chrome", "chrome.exe")
+
+            detail = ctx.exception.technicalDetail or ""
+            self.assertIn("temporary profile", detail)
+            self.assertIn("after persistent profile failure:", detail)
+            self.assertIn("persistent profile", detail)
+
+    def test_start_and_get_websocket_url_logs_warning_and_aggregates_failures(self) -> None:
+        from unittest.mock import patch
+
+        pm = bridge.BrowserProcessManager(catalog=bridge.VoiceCatalog([]))
+        chromeErr = bridge._friendly_cdp_error("closed", "Chrome temp failed (exit 0)")
+        edgeErr = bridge._friendly_cdp_error("closed", "Edge temp failed (exit 0)")
+
+        with (
+            patch.object(pm, "_prepare_browser_start", return_value=False),
+            patch.object(
+                pm,
+                "_browser_choices_or_raise",
+                return_value=(("chrome", "chrome.exe"), ("edge", "msedge.exe")),
+            ),
+            patch.object(pm, "_start_browser_choice", side_effect=[chromeErr, edgeErr]),
+            patch.object(pm, "_stop_browser_process"),
+            self.assertLogs(bridge.log, level="WARNING") as logs,
+            self.assertRaises(bridge.CdpError) as ctx,
+        ):
+            pm.start_and_get_websocket_url()
+
+        joinedLogs = "\n".join(logs.output)
+        self.assertIn("Google Chrome browser runtime failed; trying the next fallback runtime", joinedLogs)
+        self.assertIn("Microsoft Edge browser runtime failed; no fallback runtime remains", joinedLogs)
+        detail = ctx.exception.technicalDetail or ""
+        self.assertIn("Edge temp failed (exit 0)", detail)
+        self.assertIn("Previous runtime failures: Google Chrome: Chrome temp failed (exit 0)", detail)
+
+    def test_start_browser_choice_terminates_exited_process_tree_on_devtools_failure(self) -> None:
+        import io
+        import tempfile
+        from unittest.mock import MagicMock, patch
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pm = bridge.BrowserProcessManager(catalog=bridge.VoiceCatalog([]))
+            pm._serverPort = 8080
+            profileDir = Path(temp_dir)
+
+            def make_exited_proc() -> Any:
+                proc = MagicMock()
+                proc.pid = 4321
+                proc.poll.return_value = 0
+                proc.returncode = 0
+                proc.stderr = io.BytesIO(b"ERROR: startup failed\r\n")
+                return proc
+
+            terminated: list[Any] = []
+
+            def _get_profile(runtime: str, usePersistentProfile: bool = True, cancelEvent: Any = None) -> Path:
+                pm._profileDir = profileDir
+                pm._profileRuntime = runtime
+                pm._profileIsPersistent = usePersistentProfile
+                return profileDir
+
+            with (
+                patch.object(pm, "_get_browser_profile_dir", side_effect=_get_profile),
+                patch.object(pm, "_page_url", return_value="http://127.0.0.1:8080/index.html"),
+                patch.object(bridge, "_hide_chrome_windows"),
+                patch.object(bridge, "_elevate_chrome_priority"),
+                patch.object(
+                    bridge,
+                    "_terminate_subprocess",
+                    side_effect=lambda proc: terminated.append(proc),
+                ),
+                patch("subprocess.Popen", side_effect=lambda *args, **kwargs: make_exited_proc()),
+                self.assertRaises(bridge.CdpError),
+            ):
+                pm._start_browser_choice("chrome", "chrome.exe")
+
+            self.assertEqual(2, len(terminated))
+            self.assertTrue(all(proc is not None for proc in terminated))
+            self.assertIsNone(pm._chromeProcess)
+            self.assertIsNone(pm._stderrCapture)
 
     def test_browser_process_manager_terminate_server_shutdown_guards(self) -> None:
         catalog = SimpleNamespace(to_runtime_json=lambda: "{}")
@@ -825,6 +1239,23 @@ class EnsureConfigSpecTests(unittest.TestCase):
             )
             self.assertNotIn(bridge.CONFIG_SECTION, fake_conf._cache)
             self.assertNotIn(bridge.CONFIG_SECTION, fake_conf.rootSection._cache)
+
+
+class BridgeNvdaLoggingTests(unittest.TestCase):
+    """Verify ChromeTtsBridge INFO startup logs and synthDriver-gated CDP traces."""
+
+    def test_ensure_connection_logs_info_with_runtime_and_profile_mode(self) -> None:
+        from tests.test_support import make_fake_bridge
+
+        b = make_fake_bridge()
+        b._process_manager._profileIsPersistent = True
+        with self.assertLogs(bridge.log, level="INFO") as logs:
+            b.ensure_connection()
+        joined = "\n".join(logs.output)
+        self.assertIn("INFO:", joined)
+        self.assertIn("Google Chrome", joined)
+        self.assertIn(bridge.ENGINE_VERSION, joined)
+        self.assertIn("persistent profile", joined)
 
 
 if __name__ == "__main__":

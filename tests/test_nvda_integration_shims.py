@@ -337,7 +337,6 @@ def _make_stub_nvda_modules() -> dict[str, ModuleType]:
 
     logHandlerMod = ModuleType("logHandler")
     logger = logging.getLogger("nvda-shim-test")
-    logger.debugWarning = logger.warning  # type: ignore[attr-defined]
     logHandlerMod.log = logger  # type: ignore[attr-defined]
 
     nvwaveMod = ModuleType("nvwave")
@@ -499,6 +498,9 @@ def _make_stub_nvda_modules() -> dict[str, ModuleType]:
     synthDriverHandlerMod.getSynth = lambda: None  # type: ignore[attr-defined]
     synthDriverHandlerMod.setSynth = lambda *a, **k: True  # type: ignore[attr-defined]
     synthDriverHandlerMod.findAndSetNextSynth = lambda *a, **k: True  # type: ignore[attr-defined]
+    synthDriverHandlerMod.isDebugForSynthDriver = lambda: bool(  # type: ignore[attr-defined]
+        getattr(configMod.conf.get("debugLog", {}), "get", lambda *a: False)("synthDriver")
+    )
 
     autoSettingsPkg = ModuleType("autoSettingsUtils")
     autoSettingsPkg.__path__ = []  # type: ignore[attr-defined]
@@ -1303,20 +1305,28 @@ class RealNvdaIntegrationShimTests(unittest.TestCase):
 
         driver = self.synthMod.SynthDriver.__new__(self.synthMod.SynthDriver)
         driver._speakersByLanguage = {
-            "en-US": [SimpleNamespace(id="en1", speaker="a", name="English 1", language="en-US", packageId="pkg-en")],
             "vi-VN": [
                 SimpleNamespace(id="vi1", speaker="a", name="Vietnamese 1", language="vi-VN", packageId="pkg-vi")
+            ],
+            "en-US": [SimpleNamespace(id="en1", speaker="a", name="English 1", language="en-US", packageId="pkg-en")],
+            "yue-HK": [
+                SimpleNamespace(id="yue1", speaker="a", name="Cantonese 1", language="yue-HK", packageId="pkg-yue")
             ],
         }
         driver.catalog = SimpleNamespace(
             speakers=[
                 driver._speakersByLanguage["en-US"][0],
                 driver._speakersByLanguage["vi-VN"][0],
+                driver._speakersByLanguage["yue-HK"][0],
             ],
-            language_for_voice=lambda v: "vi-VN" if v == "vi1" else "en-US",
+            language_for_voice=lambda v: "vi-VN" if v == "vi1" else ("yue-HK" if v == "yue1" else "en-US"),
         )
         driver._variantsByLanguage = {}
         driver._availableVoices = driver._build_available_voices()
+        self.assertEqual(["yue-HK", "en-US", "vi-VN"], list(driver._availableVoices))
+        self.assertEqual("Cantonese", driver._availableVoices["yue-HK"].displayName)
+        self.assertEqual("English (US)", driver._availableVoices["en-US"].displayName)
+        self.assertEqual("Vietnamese", driver._availableVoices["vi-VN"].displayName)
         driver._SynthDriver__voice = "en-US"
         driver._SynthDriver__variant = "en1"
 
@@ -1817,6 +1827,378 @@ class RealNvdaIntegrationShimTests(unittest.TestCase):
             synthDriverHandler.getSynth = originalGetSynth
             globalVars.settingsRing = originalRing
 
+    def test_donate_button_and_dialog_behavior(self) -> None:
+        settingsMod = self.pluginMod.settings
+        uiUtils = self.pluginMod.uiUtils
+        wxMod = self.stubs["wx"]
+        guiMod = self.stubs["gui"]
+        globalVars = self.stubs["globalVars"]
+
+        # 1. GoogleTtsSettingsPanel.makeSettings adds donateButton wired to on_donate,
+        # and on_donate forwards extra NVDA args to show_donate_dialog(panel).
+        class _FakeControl:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                self.args = args
+                self.kwargs = kwargs
+                self.label = str(kwargs.get("label", ""))
+                self.value = kwargs.get("value", kwargs.get("initial", 0))
+                self.bindings: dict[Any, Any] = {}
+                self.enabled = True
+                self.focused = False
+                self.selection = -1
+                self.choices = list(kwargs.get("choices", []))
+                self.name = ""
+
+            def Bind(self, event: Any, handler: Any) -> None:
+                self.bindings[event] = handler
+
+            def SetName(self, name: str) -> None:
+                self.name = name
+
+            def SetSelection(self, idx: int) -> None:
+                self.selection = idx
+
+            def GetSelection(self) -> int:
+                return self.selection
+
+            def SetValue(self, val: Any) -> None:
+                self.value = val
+
+            def GetValue(self) -> Any:
+                return self.value
+
+            def Clear(self) -> None:
+                self.choices.clear()
+
+            def Append(self, item: str) -> None:
+                self.choices.append(item)
+
+            def Enable(self, enabled: bool = True) -> None:
+                self.enabled = bool(enabled)
+
+            def HasFocus(self) -> bool:
+                return self.focused
+
+            def SetFocus(self) -> None:
+                self.focused = True
+
+            def GetContainingSizer(self) -> None:
+                return None
+
+            def GetMin(self) -> int:
+                return int(self.kwargs.get("minValue", 0))
+
+            def GetMax(self) -> int:
+                return int(self.kwargs.get("maxValue", 100))
+
+            def InvalidateBestSize(self) -> None:
+                pass
+
+            def SetMinSize(self, _size: Any) -> None:
+                pass
+
+            def GetTextExtent(self, text: str) -> tuple[int, int]:
+                return (len(text) * 8, 16)
+
+            def GetCharHeight(self) -> int:
+                return 16
+
+        class _FakeSizer:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                self.items: list[Any] = []
+                self.box = _FakeControl(label=str(kwargs.get("label", "")))
+
+            def GetStaticBox(self) -> Any:
+                return self.box
+
+            def Add(self, item: Any, *args: Any, **kwargs: Any) -> None:
+                self.items.append(item)
+
+            def Show(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            def Layout(self) -> None:
+                pass
+
+            def Fit(self, _win: Any) -> None:
+                pass
+
+        class _FakeBoxSizerHelper:
+            def __init__(self, parent: Any, sizer: Any = None) -> None:
+                self.parent = parent
+                self.sizer = sizer
+                self.controls: list[Any] = []
+
+            def addItem(self, item: Any, **kwargs: Any) -> Any:
+                self.controls.append(item)
+                return item
+
+            def addLabeledControl(self, labelText: str, wxCtrlClass: Any, **kwargs: Any) -> Any:
+                ctrl = wxCtrlClass(self.parent, **kwargs)
+                self.controls.append((labelText, ctrl))
+                return ctrl
+
+        panel = settingsMod.GoogleTtsSettingsPanel.__new__(settingsMod.GoogleTtsSettingsPanel)
+        panel.Layout = lambda: None
+        panel.Bind = lambda *a, **k: None
+        panel._installed_speakers_by_language = lambda: OrderedDict()
+        panel._current_speech_defaults = lambda: {
+            "voice": "",
+            "rate": 50,
+            "rateBoost": False,
+            "pitch": 50,
+            "volume": 100,
+            "capPitchChange": 30,
+            "sayCapForCapitals": False,
+            "beepForCapitals": False,
+            "useSpellingFunctionality": True,
+        }
+        donateCalls: list[Any] = []
+        with (
+            mock.patch.object(
+                settingsMod.browserBridge,
+                "browser_runtime_snapshot",
+                return_value={
+                    "selectedRuntime": "edge",
+                    "availability": {"edge": True, "chrome": False, "brave": False},
+                    "executableAvailability": {"edge": True, "chrome": False, "brave": False},
+                    "edgeWebView2Available": True,
+                    "effectiveRuntime": "edge",
+                },
+            ),
+            mock.patch.object(wxMod, "BoxSizer", _FakeSizer, create=True),
+            mock.patch.object(wxMod, "StaticBoxSizer", _FakeSizer, create=True),
+            mock.patch.object(wxMod, "Choice", _FakeControl, create=True),
+            mock.patch.object(wxMod, "TextCtrl", _FakeControl, create=True),
+            mock.patch.object(wxMod, "CheckBox", _FakeControl, create=True),
+            mock.patch.object(wxMod, "Slider", _FakeControl, create=True),
+            mock.patch.object(wxMod, "Button", _FakeControl, create=True),
+            mock.patch.object(settingsMod.guiHelper, "BoxSizerHelper", _FakeBoxSizerHelper, create=True),
+            mock.patch.object(settingsMod.nvdaControls, "SelectOnFocusSpinCtrl", _FakeControl, create=True),
+            mock.patch.object(settingsMod, "show_donate_dialog", side_effect=lambda p: donateCalls.append(p)),
+        ):
+            panel.makeSettings(_FakeSizer())
+            self.assertEqual("&Donate...", panel.donateButton.label)
+            self.assertIn(wxMod.EVT_BUTTON, panel.donateButton.bindings)
+            panel.donateButton.bindings[wxMod.EVT_BUTTON](None)
+            panel.on_donate("extraArg", futureFlag=True)
+        self.assertEqual([panel, panel], donateCalls)
+
+        # 2. Test show_donate_dialog UI structure, clipboard copy, open link, re-entrancy, and secure mode.
+        createdDialogs: list[Any] = []
+
+        showModalHandlers: list[Any] = [lambda _dlg: None]
+
+        class _FakeDialog:
+            def __init__(self, parent: Any = None, title: str = "", *args: Any, **kwargs: Any) -> None:
+                self.parent = parent
+                self.title = title
+                self.texts: list[Any] = []
+                self.buttons: list[Any] = []
+                self.escapeId: int | None = None
+                self.modalResult: int | None = None
+                self.destroyed = False
+                createdDialogs.append(self)
+
+            def SetSizerAndFit(self, sizer: Any) -> None:
+                self.sizer = sizer
+
+            def SetEscapeId(self, escapeId: int) -> None:
+                self.escapeId = escapeId
+
+            def FromDIP(self, value: int) -> int:
+                return value
+
+            def EndModal(self, code: int) -> None:
+                self.modalResult = code
+
+            def ShowModal(self) -> int:
+                showModalHandlers[0](self)
+                return wxMod.ID_CANCEL if self.modalResult is None else self.modalResult
+
+            def Destroy(self) -> None:
+                self.destroyed = True
+
+        class _FakeStaticText:
+            def __init__(self, parent: Any, label: str = "", *args: Any, **kwargs: Any) -> None:
+                self.parent = parent
+                self.label = label
+                self.wrappedAt: int | None = None
+                if hasattr(parent, "texts"):
+                    parent.texts.append(self)
+
+            def Wrap(self, width: int) -> None:
+                self.wrappedAt = width
+
+        class _FakeButton:
+            def __init__(self, parent: Any, id: int = -1, label: str = "", *args: Any, **kwargs: Any) -> None:
+                self.parent = parent
+                self.id = id
+                self.label = label
+                self.defaulted = False
+                self.bindings: dict[Any, Any] = {}
+                if hasattr(parent, "buttons"):
+                    parent.buttons.append(self)
+
+            def SetDefault(self) -> None:
+                self.defaulted = True
+
+            def Bind(self, event: Any, handler: Any) -> None:
+                self.bindings[event] = handler
+
+        class _FakeTextDataObject:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class _FakeClipboard:
+            def __init__(self) -> None:
+                self.openShouldSucceed = True
+                self.copied: str | None = None
+                self.closed = False
+                self.flushed = False
+
+            def Open(self) -> bool:
+                self.closed = False
+                return self.openShouldSucceed
+
+            def SetData(self, dataObj: _FakeTextDataObject) -> bool:
+                self.copied = dataObj.text
+                return True
+
+            def Flush(self) -> None:
+                self.flushed = True
+
+            def Close(self) -> None:
+                self.closed = True
+
+        fakeClipboard = _FakeClipboard()
+        openedUrls: list[tuple[str, int]] = []
+        popupLog: list[str] = []
+        msgBoxes: list[tuple[str, str, int, Any]] = []
+        fakeMainFrame = SimpleNamespace(
+            IsBeingDeleted=lambda: False,
+            GetId=lambda: 1,
+            prePopup=lambda: popupLog.append("pre"),
+            postPopup=lambda: popupLog.append("post"),
+        )
+        fakeSettingsDialog = SimpleNamespace(IsBeingDeleted=lambda: False, GetId=lambda: 2)
+        fakePanelParent = SimpleNamespace(
+            IsBeingDeleted=lambda: False,
+            GetId=lambda: 3,
+            GetTopLevelParent=lambda: fakeSettingsDialog,
+        )
+
+        def _record_open_url(url: str, new: int = 0) -> bool:
+            openedUrls.append((url, new))
+            return True
+
+        def _record_msg_box(msg: str, cap: str, style: int, parent: Any) -> int:
+            msgBoxes.append((msg, cap, style, parent))
+            return int(wxMod.OK)
+
+        origPrePopup = guiMod.mainFrame.prePopup
+        origPostPopup = guiMod.mainFrame.postPopup
+        origMainFrame = guiMod.mainFrame
+        try:
+            guiMod.mainFrame = fakeMainFrame  # type: ignore[attr-defined]
+
+            with (
+                mock.patch.object(wxMod, "Dialog", _FakeDialog, create=True),
+                mock.patch.object(wxMod, "BoxSizer", _FakeSizer, create=True),
+                mock.patch.object(wxMod, "StaticText", _FakeStaticText, create=True),
+                mock.patch.object(wxMod, "TextCtrl", _FakeControl, create=True),
+                mock.patch.object(wxMod, "Button", _FakeButton, create=True),
+                mock.patch.object(wxMod, "TheClipboard", fakeClipboard, create=True),
+                mock.patch.object(wxMod, "TextDataObject", _FakeTextDataObject, create=True),
+                mock.patch.object(uiUtils.webbrowser, "open", side_effect=_record_open_url),
+                mock.patch.object(uiUtils, "show_message_box", side_effect=_record_msg_box),
+            ):
+                # Secure mode blocks dialog display completely.
+                globalVars.appArgs.secure = True  # type: ignore[attr-defined]
+                uiUtils.show_donate_dialog(fakePanelParent)
+                self.assertEqual([], createdDialogs)
+                globalVars.appArgs.secure = False  # type: ignore[attr-defined]
+
+                # Open PayPal button opens PAYPAL_DONATE_URL after closing dialog,
+                # skips mainFrame prePopup/postPopup under SettingsDialog, and blocks re-entrant calls.
+                reentrantAttempted = False
+
+                def _open_paypal_and_check_reentrancy(dlg: _FakeDialog) -> None:
+                    nonlocal reentrantAttempted
+                    uiUtils.show_donate_dialog(fakePanelParent)
+                    reentrantAttempted = True
+                    dlg.buttons[0].bindings[wxMod.EVT_BUTTON](None)
+
+                showModalHandlers[0] = _open_paypal_and_check_reentrancy
+                uiUtils.show_donate_dialog(fakePanelParent)
+                self.assertTrue(reentrantAttempted)
+                self.assertEqual(1, len(createdDialogs))
+                dlg1 = createdDialogs[0]
+                self.assertIs(fakeSettingsDialog, dlg1.parent)
+                self.assertEqual([], popupLog)
+                self.assertEqual("Donate to Google TTS For NVDA", dlg1.title)
+                self.assertEqual(wxMod.ID_CANCEL, dlg1.escapeId)
+                self.assertIn("PayPal", dlg1.texts[0].label)
+                self.assertIn(uiUtils.DONATE_TRANSFER_MEMO, dlg1.texts[0].label)
+                self.assertEqual(520, dlg1.texts[0].wrappedAt)
+                self.assertEqual(
+                    ["Open &PayPal link", "&View payment methods", "&Close"],
+                    [b.label for b in dlg1.buttons],
+                )
+                self.assertTrue(dlg1.buttons[0].defaulted)
+                self.assertEqual(wxMod.ID_CANCEL, dlg1.buttons[2].id)
+                self.assertTrue(dlg1.destroyed)
+                self.assertEqual([(uiUtils.PAYPAL_DONATE_URL, 2)], openedUrls)
+                self.assertEqual([], msgBoxes)
+
+                # Standalone call wraps mainFrame with prePopup/postPopup; Cancel does not open any URL.
+                openedUrls.clear()
+                createdDialogs.clear()
+                showModalHandlers[0] = lambda dlg: dlg.buttons[2].bindings[wxMod.EVT_BUTTON](None)
+                uiUtils.show_donate_dialog()
+                self.assertEqual(["pre", "post"], popupLog)
+                self.assertIs(fakeMainFrame, createdDialogs[0].parent)
+                self.assertTrue(createdDialogs[0].destroyed)
+                self.assertEqual([], openedUrls)
+
+                # Clicking Open payment methods page closes modal then opens DONATE.md URL.
+                createdDialogs.clear()
+                popupLog.clear()
+                showModalHandlers[0] = lambda dlg: dlg.buttons[1].bindings[wxMod.EVT_BUTTON](None)
+                uiUtils.show_donate_dialog()
+                self.assertEqual(["pre", "post"], popupLog)
+                self.assertTrue(createdDialogs[0].destroyed)
+                self.assertEqual([(uiUtils.DONATE_DOC_URL, 2)], openedUrls)
+
+                # If webbrowser.open returns False, open_web_url falls back to manual URL dialog
+                # and delegates cleanly from plugin._open_web_url.
+                openedUrls.clear()
+                createdDialogs.clear()
+                fakeClipboard.openShouldSucceed = True
+                fakeClipboard.copied = None
+                msgBoxes.clear()
+
+                def _copy_and_close_manual_url(dlg: _FakeDialog) -> None:
+                    dlg.buttons[0].bindings[wxMod.EVT_BUTTON](None)
+                    self.assertTrue(fakeClipboard.closed)
+                    dlg.buttons[1].bindings[wxMod.EVT_BUTTON](None)
+
+                showModalHandlers[0] = _copy_and_close_manual_url
+                with (
+                    mock.patch.object(uiUtils.webbrowser, "open", return_value=False),
+                    mock.patch.object(guiMod.guiHelper, "BoxSizerHelper", _FakeBoxSizerHelper, create=True),
+                ):
+                    self.pluginMod._open_web_url(uiUtils.DONATE_DOC_URL)
+                self.assertEqual(1, len(createdDialogs))
+                self.assertEqual(uiUtils.DONATE_DOC_URL, fakeClipboard.copied)
+                self.assertEqual(1, len(msgBoxes))
+        finally:
+            guiMod.mainFrame = origMainFrame  # type: ignore[attr-defined]
+            guiMod.mainFrame.prePopup = origPrePopup  # type: ignore[attr-defined]
+            guiMod.mainFrame.postPopup = origPostPopup  # type: ignore[attr-defined]
+            globalVars.appArgs.secure = False  # type: ignore[attr-defined]
+            uiUtils._donateDialogActive = False
+
     def test_voice_manager_confirm_dialogs_accept_yes_and_id_yes(self) -> None:
         voiceManagerMod = self.pluginMod.voiceManager
         wxMod = self.stubs["wx"]
@@ -2171,6 +2553,19 @@ class RealNvdaIntegrationShimTests(unittest.TestCase):
         dialog = self.pluginMod.voiceManager.VoiceManagerDialog.__new__(self.pluginMod.voiceManager.VoiceManagerDialog)
         message = dialog._user_friendly_error_message(http.client.IncompleteRead(b"part"))
         self.assertIn("internet connection", message.lower())
+        voicePackageErrorCls = self.pluginMod.voice_store.VoicePackageError
+        self.assertEqual(
+            "Translated package error",
+            dialog._user_friendly_error_message(voicePackageErrorCls("Translated package error")),
+        )
+        self.assertEqual(
+            "An unexpected error occurred while managing voice packages.",
+            dialog._user_friendly_error_message(ValueError("raw internal trace")),
+        )
+        self.assertEqual(
+            "An unexpected error occurred while managing voice packages.",
+            dialog._user_friendly_error_message(RuntimeError("raw internal bug")),
+        )
 
     def test_fatal_fallback_extraction_debounce_and_speech_loop_resilience(self) -> None:
         synthDriverHandler = self.stubs["synthDriverHandler"]
@@ -2180,9 +2575,21 @@ class RealNvdaIntegrationShimTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.exceptions: list[str] = []
                 self.errors: list[str] = []
+                self.warnings: list[str] = []
+                self.debugWarnings: list[str] = []
+                self.infos: list[str] = []
 
             def debug(self, *args: Any, **kwargs: Any) -> None:
                 pass
+
+            def debugWarning(self, msg: str = "", *args: Any, **kwargs: Any) -> None:
+                self.debugWarnings.append(msg % args if args else msg)
+
+            def info(self, msg: str = "", *args: Any, **kwargs: Any) -> None:
+                self.infos.append(msg % args if args else msg)
+
+            def warning(self, msg: str = "", *args: Any, **kwargs: Any) -> None:
+                self.warnings.append(msg % args if args else msg)
 
             def error(self, msg: str = "", *args: Any, **kwargs: Any) -> None:
                 self.errors.append(msg % args if args else msg)
@@ -2234,6 +2641,7 @@ class RealNvdaIntegrationShimTests(unittest.TestCase):
         for excToRaise, expectedMsg, expectedLogSubstr in (
             (cdpErr, "The Chromium browser runtime connection closed unexpectedly.", "WebSocket closed abruptly"),
             (RuntimeError(""), defaultMsg, "Google TTS speech failed."),
+            (RuntimeError("raw socket failure"), defaultMsg, "Google TTS speech failed."),
         ):
             wDriver = self._make_real_driver(bridgeSpeak=lambda *a, _e=excToRaise, **k: (_ for _ in ()).throw(_e))
             seenFallback: list[str] = []
@@ -2601,6 +3009,23 @@ class RealNvdaIntegrationShimTests(unittest.TestCase):
                 brkText = [c for c in brkChunks if c[0] == "text"]
                 self.assertEqual(expectedMid, brkText[0][1][4], msg=mode)
 
+            # Zero-duration BreakCommand(0) is ignored and must not split text or block mode-1 utterance-end shortening.
+            zeroBrkChunks = list(
+                driver._iter_speech_chunks(
+                    ["Hello", cmds.BreakCommand(0)],
+                    "en1",
+                    50,
+                    False,
+                    50,
+                    100,
+                    mode1,
+                    threading.Event(),
+                )
+            )
+            self.assertEqual([], [c for c in zeroBrkChunks if c[0] == "break"])
+            self.assertEqual(1, len(zeroBrkChunks))
+            self.assertEqual(mode1, zeroBrkChunks[0][1][4])
+
             # Inline non-break prosody/lang switches still trim unpunctuated WASM padding in mode 0/1,
             # while punctuated boundaries stay unshortened in mode 0/1.
             inlineChunks = list(
@@ -2821,6 +3246,43 @@ class RealNvdaIntegrationShimTests(unittest.TestCase):
         self.assertGreater(midPhraseSilenceBytes, 0)
         self.assertLess(midPhraseSilenceBytes, 5000)
         self.assertEqual(48000, finalTrailingSilenceBytes)
+
+        # Unpunctuated hidden boundary also trims the following segment's artificial WASM leading silence
+        # so the seam keeps only keepSilenceMs instead of keepSilenceMs + leading padding.
+        fedChunks.clear()
+        driver._shortAudioCache.clear()
+        driver._shortAudioCacheBytes = 0
+        leadPadding = b"\x00\x00" * 1200  # 50ms of leading silence at 24kHz
+
+        def fake_bridge_with_lead(
+            text: str,
+            options: dict[str, Any],
+            onAudio: Any,
+            cancelEvent: threading.Event,
+            *,
+            onSegmentEnd: Any = None,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            onAudio(audible0)
+            onAudio(silence)
+            if onSegmentEnd is not None:
+                onSegmentEnd()
+            onAudio(leadPadding)
+            onAudio(audible1)
+            onAudio(silence)
+            return {"success": True, "done": True, "segmentEnds": 1}
+
+        driver._bridge.speak = fake_bridge_with_lead
+        driver._speak_text(
+            "Part one part two.",
+            opts,
+            threading.Event(),
+            hiddenSegments=["Part one ", "part two."],
+            pauseShorteningMode=mode0,
+        )
+        seamBytes = sum(len(chunk) for chunk in fedChunks) - len(audible0) - len(audible1) - len(silence)
+        self.assertEqual(midPhraseSilenceBytes, seamBytes)
+        driver._bridge.speak = fake_bridge_speak
 
         # terminate() clears _shortAudioCache and acquires _warmup_lock cleanly.
         termDriver = self._make_real_driver()
@@ -3238,7 +3700,7 @@ class RealNvdaIntegrationShimTests(unittest.TestCase):
             )
         self.assertEqual([77], notifiedIndexes)
 
-    def test_batch3_ui_utils_update_gui_voice_manager_settings_and_auto_spelling_regressions(self) -> None:
+    def test_ui_utils_update_gui_voice_manager_settings_and_auto_spelling_integration(self) -> None:
         plugin = self.pluginMod
         guiMod = self.stubs["gui"]
 
@@ -3267,6 +3729,43 @@ class RealNvdaIntegrationShimTests(unittest.TestCase):
                     delattr(guiMod.settingsDialogs, "SynthesizerSelectionDialog")
             else:
                 guiMod.settingsDialogs.SynthesizerSelectionDialog = origSynthDlg
+
+        # 1b. Missing synthesizer dialog class logs untranslated error and translates user dialog text.
+        seenTranslated: list[str] = []
+        shownDialogs: list[tuple[Any, ...]] = []
+        origDlgA = getattr(guiMod.settingsDialogs, "SynthesizerSelectionDialog", None)
+        origDlgB = getattr(guiMod.settingsDialogs, "SynthesizerDialog", None)
+        try:
+            for attrName in ("SynthesizerSelectionDialog", "SynthesizerDialog"):
+                with contextlib.suppress(AttributeError):
+                    delattr(guiMod.settingsDialogs, attrName)
+
+            def _record_tr(text: str) -> str:
+                seenTranslated.append(text)
+                return text
+
+            def _record_dialog(*args: Any, **kwargs: Any) -> int:
+                shownDialogs.append((args, kwargs))
+                return 0
+
+            with (
+                mock.patch.dict(sys.modules, self.stubs),
+                mock.patch.object(plugin.uiUtils, "_", side_effect=_record_tr, create=True),
+                mock.patch.object(
+                    plugin.uiUtils,
+                    "show_message_box",
+                    side_effect=_record_dialog,
+                ),
+            ):
+                self.assertFalse(plugin.uiUtils.open_synthesizer_dialog())
+            self.assertNotIn("Select Synthesizer dialog class was not found.", seenTranslated)
+            self.assertIn("The Select Synthesizer dialog could not be opened.", seenTranslated)
+            self.assertEqual(1, len(shownDialogs))
+        finally:
+            if origDlgA is not None:
+                guiMod.settingsDialogs.SynthesizerSelectionDialog = origDlgA
+            if origDlgB is not None:
+                guiMod.settingsDialogs.SynthesizerDialog = origDlgB
 
         # 2. Automatic update check skips notification if a modal dialog is already open.
         updateGuiMod = plugin.updateGui
@@ -3875,6 +4374,226 @@ class RealNvdaIntegrationShimTests(unittest.TestCase):
                 pauseShorteningMode=self.synthMod._PAUSE_MODE_DO_NOT_SHORTEN,
             )
             self.assertEqual([301, 302], notified)
+
+    def test_nvda_logging_alignment_levels_strict_exception_and_synth_driver_category(self) -> None:
+        plugin = self.pluginMod
+        synthMod = self.synthMod
+        uiUtils = plugin.uiUtils
+        langUtils = synthMod.language_utils
+        shimLogger = self.stubs["logHandler"].log
+
+        # 1. All runtime & plugin modules bind NVDA's shared logHandler.log (not module-named loggers).
+        for module in (
+            synthMod,
+            synthMod.bridge,
+            synthMod.standby,
+            synthMod.voice_store,
+            synthMod.language_detector,
+            synthMod._TEXT_SEGMENTER.__class__.__module__
+            and sys.modules[synthMod._TEXT_SEGMENTER.__class__.__module__],
+            synthMod.standby.DirectoryChangeWatcher.__module__
+            and sys.modules[synthMod.standby.DirectoryChangeWatcher.__module__],
+            plugin,
+            plugin.settings,
+            plugin.updateGui,
+            plugin.voiceManager,
+            plugin.updater,
+        ):
+            self.assertIs(shimLogger, module.log)
+
+        # 2. ensure_nvda_logger_methods preserves native NVDA loggers verbatim while polyfilling plain loggers.
+        nativeLikeLogger = SimpleNamespace(debugWarning=lambda *a, **k: None, io=lambda *a, **k: None)
+        self.assertIs(nativeLikeLogger, langUtils.ensure_nvda_logger_methods(nativeLikeLogger))
+        standaloneLogger = logging.getLogger("googleTtsForNvda.standaloneLoggingTest")
+        wrappedLogger = langUtils.ensure_nvda_logger_methods(standaloneLogger)
+        self.assertIs(standaloneLogger, wrappedLogger)
+        with self.assertLogs(wrappedLogger, level=langUtils.NVDA_LOG_LEVEL_DEBUGWARNING) as dwLogs:
+            wrappedLogger.debugWarning("fallback %s", "warning")
+        self.assertIn("DEBUGWARNING", dwLogs.output[0])
+        self.assertIn("fallback warning", dwLogs.output[0])
+
+        # 3. uiUtils.open_web_url works cleanly under NVDA's strict Logger.exception signature (no *args).
+        class _StrictOpenUrlLogger:
+            def __init__(self) -> None:
+                self.warnings: list[str] = []
+
+            def warning(self, msg: str = "", *args: Any, **kwargs: Any) -> None:
+                self.warnings.append(msg % args if args else msg)
+
+            def exception(self, msg: str = "", exc_info: Any = True, **kwargs: Any) -> None:
+                if not isinstance(exc_info, (bool, tuple, BaseException)):
+                    raise TypeError(f"Invalid NVDA Logger.exception exc_info: {exc_info!r}")
+
+        strictOpenLogger = _StrictOpenUrlLogger()
+        manualDialogs: list[str] = []
+        with (
+            mock.patch.dict(sys.modules, {"logHandler": SimpleNamespace(log=strictOpenLogger)}),
+            mock.patch.object(uiUtils.webbrowser, "open", side_effect=OSError("no browser")),
+            mock.patch.object(
+                uiUtils,
+                "show_manual_web_url_dialog",
+                side_effect=lambda url, **kw: manualDialogs.append(url),
+            ),
+        ):
+            self.assertFalse(uiUtils.open_web_url(uiUtils.PAYPAL_DONATE_URL, logContext="PayPal link"))
+        self.assertEqual([uiUtils.PAYPAL_DONATE_URL], manualDialogs)
+        self.assertTrue(any("PayPal link" in entry for entry in strictOpenLogger.warnings))
+
+        # 4. Per-utterance speech group & cache debug logs respect NVDA debugLog["synthDriver"].
+        driver = self._make_real_driver()
+        opts = {
+            "voiceName": "en-a",
+            "lang": "en-US",
+            "rate": 1.0,
+            "artificialRate": 1.0,
+            "pitch": 1.0,
+            "postPitch": 1.0,
+            "volume": 1.0,
+            "outputGain": 1.0,
+            "voiceId": "en1",
+        }
+        speechLogger = logging.getLogger("googleTtsForNvda.synthDebugCategoryTest")
+        langUtils.ensure_nvda_logger_methods(speechLogger)
+        driver._bridge = SimpleNamespace(
+            speak=lambda _t, _o, onAudio, _cancel, **_kw: (
+                onAudio(b"\x00\x04" * 2400),
+                {"success": True, "done": True, "segmentEnds": 0},
+            )[-1]
+        )
+        configMod = self.stubs["config"]
+        savedDebugLog = configMod.conf.get("debugLog")
+        try:
+            with mock.patch.object(synthMod, "log", speechLogger):
+                configMod.conf["debugLog"] = {"synthDriver": False}
+                with self.assertLogs(speechLogger, level="DEBUG") as disabledLogs:
+                    speechLogger.debug("marker")
+                    driver._speak_text(
+                        "hello.",
+                        opts,
+                        threading.Event(),
+                        pauseShorteningMode=synthMod._PAUSE_MODE_DO_NOT_SHORTEN,
+                    )
+                self.assertFalse(any("Google TTS speech group" in line for line in disabledLogs.output))
+
+                configMod.conf["debugLog"] = {"synthDriver": True}
+                with self.assertLogs(speechLogger, level="DEBUG") as enabledLogs:
+                    driver._speak_text(
+                        "hello again.",
+                        opts,
+                        threading.Event(),
+                        pauseShorteningMode=synthMod._PAUSE_MODE_DO_NOT_SHORTEN,
+                    )
+                self.assertTrue(any("Google TTS speech group" in line for line in enabledLogs.output))
+        finally:
+            if savedDebugLog is None:
+                configMod.conf.pop("debugLog", None)
+            else:
+                configMod.conf["debugLog"] = savedDebugLog
+
+        # 5. Corrupt voice verification cache logs DEBUGWARNING (level 15).
+        with tempfile.TemporaryDirectory() as tmpDir:
+            badCache = Path(tmpDir) / "verified_voices.json"
+            badCache.write_text("{corrupt", encoding="utf-8")
+            with (
+                mock.patch.object(synthMod.voice_store, "_verification_cache_path", return_value=badCache),
+                mock.patch.object(synthMod.voice_store, "_persistentVerifiedPackageCache", None),
+                mock.patch.object(synthMod.voice_store, "log", standaloneLogger),
+                self.assertLogs(standaloneLogger, level=15) as cacheLogs,
+            ):
+                loadedCache = synthMod.voice_store._load_persistent_verification_cache()
+            self.assertEqual({}, loadedCache)
+            self.assertTrue(any("DEBUGWARNING" in entry for entry in cacheLogs.output))
+
+    def test_settings_prune_voice_manager_profile_reset_and_say_all_idempotency(self) -> None:
+        plugin = self.pluginMod
+        settingsMod = plugin.settings
+        vmMod = plugin.voiceManager
+
+        # 1. Settings panel prunes uninstalled languages from _autoLanguageProfiles on catalog refresh.
+        panel = settingsMod.GoogleTtsSettingsPanel.__new__(settingsMod.GoogleTtsSettingsPanel)
+        panel._speakersByLanguage = {
+            "en-US": [SimpleNamespace(id="en1", name="English 1", language="en-US")],
+            "fr-FR": [SimpleNamespace(id="fr1", name="French 1", language="fr-FR")],
+        }
+        panel._languageValues = ["en-US", "fr-FR"]
+        panel._languageCounts = {"en-US": 1, "fr-FR": 1}
+        panel._autoLanguageProfiles = {"en-US": {"enabled": True}, "fr-FR": {"enabled": True}}
+        panel._selectedAutoLanguageProfileIndex = 0
+        panel._loadingAutoLanguageProfile = False
+        panel._installed_speakers_by_language = lambda: {
+            "en-US": [SimpleNamespace(id="en1", name="English 1", language="en-US")]
+        }
+        panel._store_selected_auto_language_profile = lambda _idx: None
+        panel._ensure_auto_language_profiles = lambda: None
+        panel._refresh_preferred_language_choices = lambda: None
+        panel._load_selected_auto_language_profile = lambda: None
+        panel._refresh_auto_language_controls = lambda: None
+        panel.autoProfileLanguageChoice = SimpleNamespace(
+            Clear=lambda: None,
+            Append=lambda _label: None,
+            SetSelection=lambda _idx: None,
+            GetSelection=lambda: 0,
+        )
+        panel._refresh_installed_catalog_in_panel()
+        self.assertEqual(["en-US"], list(panel._autoLanguageProfiles))
+
+        # 2. VoiceManager resets candidates and preserves preferred case-insensitively even when profiles JSON is invalid.
+        vm = vmMod.VoiceManagerDialog.__new__(vmMod.VoiceManagerDialog)
+        vm._allUsableInstalledPackages = [
+            self._make_voice_package(
+                "en-us-x-multi",
+                speakers=({"speaker": "en1", "name": "English 1", "gender": "female"},),
+            )
+        ]
+        section = {
+            "autoLanguageProfiles": "{broken-json",
+            "autoLanguagePreferred": "en-us",
+            "autoLanguageCandidates": "fr-FR,en-US",
+        }
+        fakeConf = {vmMod.browserBridge.CONFIG_SECTION: section}
+        with mock.patch.object(vmMod.config, "conf", fakeConf):
+            self.assertTrue(vm._reset_auto_language_profile_variants_if_removed({"fr-fr-x-multi"}))
+        self.assertEqual("en-US", section["autoLanguagePreferred"])
+        self.assertEqual("en-US", section["autoLanguageCandidates"])
+
+        # 3. Repeated sayAll.initialize() does not double-wrap SayAllHandler speak/speakWithoutPauses.
+        sayAllMod = self.stubs["speech.sayAll"]
+        origHandler = getattr(sayAllMod, "SayAllHandler", None)
+        origInit = getattr(sayAllMod, "initialize", None)
+        origSayAllAttr = plugin.sayAllModule
+        swpCalls: list[Any] = []
+
+        def _fake_swp(seq: Any, *a: Any, **k: Any) -> bool:
+            swpCalls.append(seq)
+            return True
+
+        swpObj = SimpleNamespace(
+            speak=lambda seq, *a, **k: None,
+            speakWithoutPauses=_fake_swp,
+        )
+        fakeSayAll = SimpleNamespace(
+            SayAllHandler=SimpleNamespace(speechWithoutPausesInstance=swpObj),
+            initialize=lambda: None,
+        )
+        try:
+            plugin._unpatch_auto_language_voice_dictionary()
+            plugin.sayAllModule = fakeSayAll
+            plugin._patch_auto_language_voice_dictionary()
+            firstSpeak = swpObj.speak
+            firstSwp = swpObj.speakWithoutPauses
+            fakeSayAll.initialize()
+            self.assertIs(firstSpeak, swpObj.speak)
+            self.assertIs(firstSwp, swpObj.speakWithoutPauses)
+            fakeSayAll.initialize()
+            self.assertIs(firstSpeak, swpObj.speak)
+            self.assertIs(firstSwp, swpObj.speakWithoutPauses)
+        finally:
+            plugin._unpatch_auto_language_voice_dictionary()
+            plugin.sayAllModule = origSayAllAttr
+            if origHandler is not None:
+                sayAllMod.SayAllHandler = origHandler
+            if origInit is not None:
+                sayAllMod.initialize = origInit
 
 
 if __name__ == "__main__":

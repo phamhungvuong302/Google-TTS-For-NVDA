@@ -5,7 +5,17 @@ import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
+
+try:
+    import addonHandler
+
+    addonHandler.initTranslation()
+except Exception:
+
+    def _(message: str) -> str:
+        return message
+
 
 BASE_DIR = Path(__file__).resolve().parent
 ENGINE_VERSION = "20261110.1"
@@ -137,7 +147,7 @@ def inspect_engine_library() -> None:
     try:
         manifest = json.loads((ENGINE_DIR / "manifest.json").read_text(encoding="utf-8"))
         manifestVersion = str(manifest.get("version") or "").strip() if isinstance(manifest, dict) else ""
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise EngineLibraryError(
             "incomplete",
             foundVersions=foundVersions,
@@ -152,6 +162,20 @@ def inspect_engine_library() -> None:
                 f"does not match supported version {ENGINE_VERSION}."
             ),
         )
+
+
+def _raise_invalid_catalog(
+    path: Path | None,
+    engineDetail: str,
+    valueDetail: str,
+    *,
+    cause: Exception | None = None,
+) -> NoReturn:
+    if path is None:
+        raise EngineLibraryError("invalidCatalog", technicalDetail=engineDetail) from cause
+    if cause is not None:
+        raise ValueError(valueDetail) from cause
+    raise ValueError(valueDetail)
 
 
 class VoiceCatalog:
@@ -175,7 +199,7 @@ class VoiceCatalog:
                     technicalDetail=f"WASM TTS Engine voice catalog could not be opened: {exc}",
                 ) from exc
             raise
-        except json.JSONDecodeError as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             if path is None:
                 raise EngineLibraryError(
                     "invalidCatalog",
@@ -183,12 +207,11 @@ class VoiceCatalog:
                 ) from exc
             raise
         if not isinstance(raw, list):
-            if path is None:
-                raise EngineLibraryError(
-                    "invalidCatalog",
-                    technicalDetail="WASM TTS Engine voice catalog JSON must be a list.",
-                )
-            raise ValueError("Voice catalog JSON must be a list.")
+            _raise_invalid_catalog(
+                path,
+                "WASM TTS Engine voice catalog JSON must be a list.",
+                "Voice catalog JSON must be a list.",
+            )
         packages: list[VoicePackage] = []
         for item in raw:
             if not isinstance(item, dict):
@@ -202,35 +225,29 @@ class VoiceCatalog:
                 or "\x00" in packageId
                 or ".." in packageId
             ):
-                if path is None:
-                    raise EngineLibraryError(
-                        "invalidCatalog",
-                        technicalDetail=f"WASM TTS Engine voice catalog contains an invalid package id: {packageId!r}",
-                    )
-                raise ValueError(f"Invalid voice package id in catalog: {packageId!r}")
+                _raise_invalid_catalog(
+                    path,
+                    f"WASM TTS Engine voice catalog contains an invalid package id: {packageId!r}",
+                    f"Invalid voice package id in catalog: {packageId!r}",
+                )
             rawCompressedSize = item.get("compressedSize")
             try:
                 if isinstance(rawCompressedSize, bool):
                     raise ValueError("Boolean compressedSize is invalid.")
                 compressedSize = 0 if rawCompressedSize is None else int(rawCompressedSize)
             except (TypeError, ValueError) as exc:
-                if path is None:
-                    raise EngineLibraryError(
-                        "invalidCatalog",
-                        technicalDetail=(
-                            f"WASM TTS Engine voice catalog contains an invalid compressedSize: {rawCompressedSize!r}"
-                        ),
-                    ) from exc
-                raise ValueError(f"Invalid compressedSize in voice catalog: {rawCompressedSize!r}") from exc
+                _raise_invalid_catalog(
+                    path,
+                    f"WASM TTS Engine voice catalog contains an invalid compressedSize: {rawCompressedSize!r}",
+                    f"Invalid compressedSize in voice catalog: {rawCompressedSize!r}",
+                    cause=exc,
+                )
             if compressedSize < 0:
-                if path is None:
-                    raise EngineLibraryError(
-                        "invalidCatalog",
-                        technicalDetail=(
-                            f"WASM TTS Engine voice catalog contains a negative compressedSize: {rawCompressedSize!r}"
-                        ),
-                    )
-                raise ValueError(f"Negative compressedSize in voice catalog: {rawCompressedSize!r}")
+                _raise_invalid_catalog(
+                    path,
+                    f"WASM TTS Engine voice catalog contains a negative compressedSize: {rawCompressedSize!r}",
+                    f"Negative compressedSize in voice catalog: {rawCompressedSize!r}",
+                )
             speakers = item.get("speakers")
             if not isinstance(speakers, list):
                 speakers = []
@@ -320,17 +337,6 @@ def engine_library_error_message(error: EngineLibraryError) -> str:
     Shared by the synth driver and the global plugin so both produce
     identical wording without duplicating the translation strings.
     """
-    import builtins
-
-    try:
-        import addonHandler
-
-        addonHandler.initTranslation()
-    except Exception:
-        pass
-    rawTranslator = getattr(builtins, "_", str)
-    _: Any = rawTranslator if callable(rawTranslator) else str
-
     if error.kind == "unsupportedVersion":
         found = ", ".join(error.foundVersions) if error.foundVersions else _("another version")
         return _(

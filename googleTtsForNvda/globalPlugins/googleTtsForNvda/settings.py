@@ -8,13 +8,11 @@ from typing import Any
 import addonHandler
 import config
 import globalVars
-import languageHandler
 import synthDriverHandler
 import ui
 import wx
 from gui import guiHelper, nvdaControls
 from gui.settingsDialogs import SettingsPanel
-from logHandler import log
 from synthDrivers.googleTtsForNvda import audio_math, language_utils, standby, voice_store
 from synthDrivers.googleTtsForNvda import bridge as browserBridge
 from synthDrivers.googleTtsForNvda.catalog import Speaker, VoiceCatalog
@@ -24,8 +22,10 @@ from .uiUtils import (
     bind_read_only_text_focus_announcement,
     dialog_parent,
     is_google_synth_current,
+    nvda_translate,
     open_synthesizer_dialog,
     resize_read_only_text_for_content,
+    show_donate_dialog,
     show_message_box,
     step_after_synth_switch,
     stop_call_later,
@@ -34,7 +34,8 @@ from .uiUtils import (
 from .uiUtils import (
     call_compat as _call_compat,
 )
-from .voiceManager import _visible_language_sort_key, get_language_display_name
+
+log = language_utils.get_nvda_logger()
 
 addonHandler.initTranslation()
 
@@ -57,7 +58,7 @@ def _parse_language_codes(value: str | None) -> list[str]:
 
 
 def _format_language_choice(language: str, count: int | None = None) -> str:
-    languageName = get_language_display_name(language)
+    languageName = language_utils.get_language_display_name(language)
     if count is None:
         return languageName
     return _("{language} ({count} voices)").format(language=languageName, count=count)
@@ -73,17 +74,6 @@ def _nvda_synth_setting_name(settingFactory: object, fallback: str) -> str:
     except Exception:
         pass
     return fallback
-
-
-def _nvda_label(message: str) -> str:
-    try:
-        translationRef = getattr(languageHandler, "installedTranslation", None)
-        translation = translationRef() if translationRef is not None else None
-        if translation is not None:
-            return str(translation.gettext(message))
-    except Exception:
-        log.debug("Could not use NVDA translation for setting label.", exc_info=True)
-    return message
 
 
 def _create_settings_slider(
@@ -114,8 +104,6 @@ def _bind_slider_page_keys(slider: wx.Slider) -> None:
             slider.GetEventHandler().ProcessEvent(
                 wx.CommandEvent(wx.EVT_SLIDER.typeId, slider.GetId()),
             )
-        else:
-            evt.Skip()
 
     slider.Bind(wx.EVT_CHAR_HOOK, on_char_hook)
 
@@ -162,8 +150,11 @@ def _schedule_runtime_change_after_synth_switch(runtime: str, parent: wx.Window 
 
     def open_dialog_and_wait() -> None:
         global _pendingRuntimeTimer
+        if _pendingRuntimeChange != runtime:
+            return
         if _open_synthesizer_dialog(dialog_parent(parent)):
             if _pendingRuntimeChange == runtime:
+                stop_call_later(_pendingRuntimeTimer)
                 _pendingRuntimeTimer = wx.CallLater(500, _apply_runtime_after_synth_switch, runtime, 0)
         else:
             _clear_pending_runtime_change(runtime)
@@ -283,10 +274,10 @@ class GoogleTtsSettingsPanel(SettingsPanel):
         )
         self._pitchSettingName = _nvda_synth_setting_name(synthDriverHandler.SynthDriver.PitchSetting, "Pitch")
         self._volumeSettingName = _nvda_synth_setting_name(synthDriverHandler.SynthDriver.VolumeSetting, "Volume")
-        self._capPitchSettingName = _nvda_label("Capital pitch change percentage")
-        self._sayCapSettingName = _nvda_label("Say &cap before capitals")
-        self._beepCapsSettingName = _nvda_label("&Beep for capitals")
-        self._spellingSettingName = _nvda_label("Use &spelling functionality if supported")
+        self._capPitchSettingName = nvda_translate("Capital pitch change percentage")
+        self._sayCapSettingName = nvda_translate("Say &cap before capitals")
+        self._beepCapsSettingName = nvda_translate("&Beep for capitals")
+        self._spellingSettingName = nvda_translate("Use &spelling functionality if supported")
         self._preferredLanguageValues = self._enabled_auto_language_candidates()
 
         helper = guiHelper.BoxSizerHelper(self, sizer=settingsSizer)
@@ -450,6 +441,10 @@ class GoogleTtsSettingsPanel(SettingsPanel):
         self.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy)
         self._refresh_update_controls()
 
+        donateGroup = self._add_settings_group(helper, _("Support the add-on"))
+        self.donateButton = donateGroup.addButton(_("&Donate..."))
+        self.donateButton.Bind(wx.EVT_BUTTON, self.on_donate)
+
         self._refresh_auto_language_controls()
         settingsSizer.Fit(self)
 
@@ -467,6 +462,12 @@ class GoogleTtsSettingsPanel(SettingsPanel):
         self._speakersByLanguage = newSpeakersByLanguage
         self._languageValues = list(newSpeakersByLanguage)
         self._languageCounts = {language: len(speakers) for language, speakers in newSpeakersByLanguage.items()}
+        installedLanguages = set(self._languageValues)
+        self._autoLanguageProfiles = {
+            language: profile
+            for language, profile in self._autoLanguageProfiles.items()
+            if language in installedLanguages
+        }
         self._ensure_auto_language_profiles()
         self.autoProfileLanguageChoice.Clear()
         for language in self._languageValues:
@@ -482,6 +483,15 @@ class GoogleTtsSettingsPanel(SettingsPanel):
         self._load_selected_auto_language_profile()
         self._refresh_auto_language_controls()
 
+    def _refresh_runtime_choice_labels(self) -> None:
+        selectedIndex = self.runtimeChoice.GetSelection()
+        for index, runtime in enumerate(self._runtimeValues):
+            newLabel = self._format_runtime_choice(runtime)
+            if self.runtimeChoice.GetString(index) != newLabel:
+                self.runtimeChoice.SetString(index, newLabel)
+        if 0 <= selectedIndex < len(self._runtimeValues):
+            self.runtimeChoice.SetSelection(selectedIndex)
+
     def onPanelActivated(self, *args: object, **kwargs: object) -> None:
         parentActivated = getattr(super(), "onPanelActivated", None)
         if callable(parentActivated):
@@ -490,6 +500,7 @@ class GoogleTtsSettingsPanel(SettingsPanel):
             return
         self._refresh_installed_catalog_in_panel()
         self._refresh_runtime_status(self._selected_runtime_choice())
+        self._refresh_runtime_choice_labels()
         self._refresh_keep_browser_runtime_ready_status()
         self._refresh_update_controls()
 
@@ -565,7 +576,6 @@ class GoogleTtsSettingsPanel(SettingsPanel):
         _save_browser_runtime(selectedRuntime)
         self._savedRuntime = selectedRuntime
         self._refresh_runtime_status(self._savedRuntime)
-        standby.refresh_async("Google TTS standby browser runtime setting changed")
 
     def on_runtime_choice_changed(self, evt: wx.CommandEvent | None = None, *args: object, **kwargs: object) -> None:
         self._refresh_runtime_status(self._selected_runtime_choice())
@@ -609,6 +619,9 @@ class GoogleTtsSettingsPanel(SettingsPanel):
             self._refresh_update_controls()
         else:
             self._restoreFocusAfterUpdateCheck = False
+
+    def on_donate(self, evt: wx.CommandEvent | None = None, *args: object, **kwargs: object) -> None:
+        show_donate_dialog(self)
 
     def on_auto_update_check_changed(
         self,
@@ -740,7 +753,7 @@ class GoogleTtsSettingsPanel(SettingsPanel):
                 fullCatalog = VoiceCatalog.load()
                 speakers = VoiceCatalog(voice_store.installed_packages(fullCatalog)).speakers
         except Exception:
-            log.debug("Could not read installed Google TTS languages for settings.", exc_info=True)
+            log.debugWarning("Could not read installed Google TTS languages for settings.", exc_info=True)
             return OrderedDict()
         grouped: dict[str, list[Speaker]] = {}
         for speaker in speakers:
@@ -751,7 +764,9 @@ class GoogleTtsSettingsPanel(SettingsPanel):
         return OrderedDict(
             sorted(
                 grouped.items(),
-                key=lambda item: _visible_language_sort_key(get_language_display_name(item[0])),
+                key=lambda item: language_utils.visible_language_sort_key(
+                    language_utils.get_language_display_name(item[0])
+                ),
             ),
         )
 
@@ -797,7 +812,7 @@ class GoogleTtsSettingsPanel(SettingsPanel):
                 defaults["pitch"] = self._profile_int(getattr(currentSynth, "pitch", defaults["pitch"]), 50)
                 defaults["volume"] = self._profile_int(getattr(currentSynth, "volume", defaults["volume"]), 100)
         except Exception:
-            log.debug("Could not read current Google TTS speech settings.", exc_info=True)
+            log.debugWarning("Could not read current Google TTS speech settings.", exc_info=True)
         return defaults
 
     def _configured_auto_language_detection(self) -> bool:
@@ -1061,7 +1076,7 @@ class GoogleTtsSettingsPanel(SettingsPanel):
                     self._savedAutoLanguageDetection = False
                     self._refresh_synth_settings_ring(reloadSpeechSettings=True)
                 except Exception:
-                    log.debug("Could not disable Google TTS automatic language profiles.", exc_info=True)
+                    log.debugWarning("Could not disable Google TTS automatic language profiles.", exc_info=True)
             return
         enabled = self.autoLanguageCheck.GetValue() and bool(self._languageValues)
         candidates = self._checked_auto_language_candidates()
@@ -1106,8 +1121,10 @@ class GoogleTtsSettingsPanel(SettingsPanel):
             )
             self._refresh_synth_settings_ring(reloadSpeechSettings=wasEnabled and not enabled)
             self._savedAutoLanguageDetection = enabled
+            self._savedAutoLanguagePreferred = preferred
+            self._savedAutoLanguageCandidates = list(candidates)
         except Exception:
-            log.debug("Could not save Google TTS automatic language profile settings.", exc_info=True)
+            log.debugWarning("Could not save Google TTS automatic language profile settings.", exc_info=True)
 
     def _refresh_synth_settings_ring(self, reloadSpeechSettings: bool = False) -> None:
         try:
@@ -1142,4 +1159,4 @@ class GoogleTtsSettingsPanel(SettingsPanel):
             if callable(warmCurrentVoice):
                 warmCurrentVoice()
         except Exception:
-            log.debug("Could not refresh Google TTS supported speech settings.", exc_info=True)
+            log.debugWarning("Could not refresh Google TTS supported speech settings.", exc_info=True)

@@ -16,6 +16,25 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
+try:
+    from synthDrivers.googleTtsForNvda.language_utils import get_nvda_logger
+
+    log = get_nvda_logger()
+except Exception:
+    import logging
+
+    logging.addLevelName(15, "DEBUGWARNING")
+    log = logging.getLogger("googleTtsForNvda")
+    if not hasattr(log, "debugWarning"):
+
+        def _fallback_debug_warning(msg: Any, *args: Any, **kwargs: Any) -> Any:
+            if not log.isEnabledFor(15):
+                return None
+            kwargs["stacklevel"] = int(kwargs.get("stacklevel", 1)) + 1
+            return log.log(15, msg, *args, **kwargs)
+
+        log.debugWarning = _fallback_debug_warning  # type: ignore[method-assign]
+
 ADDON_ID = "googleTtsForNvda"
 BUILD_INFO_FILE_NAME = "buildInfo.json"
 UPDATE_CHANNEL = "stable"
@@ -111,16 +130,20 @@ def current_version() -> str:
     return _strip_manifest_value(match.group(1))
 
 
-def _non_negative_int(value: Any, key: str, source: str) -> int:
+def _parse_bounded_int(value: Any, key: str, source: str, *, minimum: int = 0) -> int:
     if isinstance(value, (bool, float)):
         raise UpdateError(f"The {source} has an invalid {key}.")
     try:
         number = int(value)
     except (TypeError, ValueError) as exc:
         raise UpdateError(f"The {source} has an invalid {key}.") from exc
-    if number < 0:
+    if number < minimum:
         raise UpdateError(f"The {source} has an invalid {key}.")
     return number
+
+
+def _non_negative_int(value: Any, key: str, source: str) -> int:
+    return _parse_bounded_int(value, key, source, minimum=0)
 
 
 def _read_build_info_json() -> dict[str, Any]:
@@ -230,16 +253,7 @@ def _optional_string(data: dict[str, Any], key: str) -> str:
 
 
 def _required_size(data: dict[str, Any]) -> int:
-    value = data.get("size")
-    if isinstance(value, (bool, float)):
-        raise UpdateError("The update manifest has an invalid size.")
-    try:
-        size = int(value)
-    except (TypeError, ValueError) as exc:
-        raise UpdateError("The update manifest has an invalid size.") from exc
-    if size <= 0:
-        raise UpdateError("The update manifest has an invalid size.")
-    return size
+    return _parse_bounded_int(data.get("size"), "size", "update manifest", minimum=1)
 
 
 def _sha256(data: dict[str, Any]) -> str:
@@ -298,9 +312,23 @@ def _release_notes(data: dict[str, Any], locale: str | None) -> str:
     localeKey = _locale_key(locale)
     byLocale = data.get("releaseNotesByLocale")
     if localeKey and isinstance(byLocale, dict):
-        value = byLocale.get(localeKey)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+        baseLocale = localeKey.split("_", 1)[0]
+        lookupKeys = [localeKey]
+        if baseLocale != localeKey:
+            lookupKeys.append(baseLocale)
+        for key in lookupKeys:
+            value = byLocale.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        normalizedByLocale = {
+            _locale_key(str(rawKey)).casefold(): rawValue
+            for rawKey, rawValue in byLocale.items()
+            if isinstance(rawKey, str) and isinstance(rawValue, str) and rawValue.strip()
+        }
+        for key in lookupKeys:
+            matched = normalizedByLocale.get(key.casefold())
+            if matched is not None:
+                return matched.strip()
     value = data.get("releaseNotes")
     return value.strip() if isinstance(value, str) else ""
 
@@ -504,7 +532,7 @@ def _remove_update_dir_if_empty() -> None:
     except FileNotFoundError:
         pass
     except OSError:
-        pass
+        log.debugWarning("Could not clean temporary Google TTS For NVDA update files.", exc_info=True)
 
 
 def _raise_if_cancelled(cancel_requested: Callable[[], bool] | None) -> None:
@@ -520,6 +548,8 @@ def download_update(
     on_response: Callable[[Any], None] | None = None,
 ) -> DownloadedUpdate:
     _raise_if_cancelled(cancel_requested)
+    if update.size <= 0:
+        raise UpdateError("The update manifest has an invalid size.")
     if update.size > MAX_UPDATE_PACKAGE_BYTES:
         raise UpdateError("The update package is too large.")
     parsedUrl = urlparse(update.url)
@@ -534,18 +564,6 @@ def download_update(
     targetPath = _download_path_for_update(update)
     if _is_reparse_or_symlink(targetPath):
         raise UpdateError("Could not prepare the update download file.")
-    try:
-        _remove_file_if_present(targetPath)
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=downloadDir,
-            prefix=f"{targetPath.name}.",
-            suffix=".download",
-            delete=False,
-        ) as tempFile:
-            partialPath = Path(tempFile.name)
-    except OSError as exc:
-        raise UpdateError("Could not prepare the update download file.") from exc
     request = urllib.request.Request(
         update.url,
         headers={
@@ -553,74 +571,75 @@ def download_update(
             "User-Agent": f"{ADDON_ID}/{current_version()}",
         },
     )
+    partialPath: Path | None = None
     received = 0
     digest = hashlib.sha256()
     try:
-        _raise_if_cancelled(cancel_requested)
-        with _open_https_url(request, timeout=timeout) as response, partialPath.open("wb") as outFile:
+        prepared = False
+        try:
+            _remove_file_if_present(targetPath)
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=downloadDir,
+                prefix=f"{targetPath.name}.",
+                suffix=".download",
+                delete=False,
+            ) as outFile:
+                partialPath = Path(outFile.name)
+                prepared = True
+                _raise_if_cancelled(cancel_requested)
+                with _open_https_url(request, timeout=timeout) as response:
+                    if on_response is not None:
+                        with contextlib.suppress(Exception):
+                            on_response(response)
+                    if not _response_uses_https(response, update.url):
+                        raise UpdateError("The update download URL must use HTTPS.")
+                    while True:
+                        _raise_if_cancelled(cancel_requested)
+                        chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+                        _raise_if_cancelled(cancel_requested)
+                        if not chunk:
+                            break
+                        received += len(chunk)
+                        if received > update.size:
+                            raise UpdateError("The downloaded update package is larger than expected.")
+                        outFile.write(chunk)
+                        digest.update(chunk)
+                        if progress is not None:
+                            progress(received, update.size)
+                        _raise_if_cancelled(cancel_requested)
+        except UpdateError:
+            raise
+        except OSError as exc:
+            if not prepared:
+                raise UpdateError("Could not prepare the update download file.") from exc
+            _raise_if_cancelled(cancel_requested)
+            raise UpdateError("Could not download the update package.") from exc
+        except (http.client.HTTPException, ValueError) as exc:
+            _raise_if_cancelled(cancel_requested)
+            raise UpdateError("Could not download the update package.") from exc
+        except Exception:
+            _raise_if_cancelled(cancel_requested)
+            raise
+        finally:
             if on_response is not None:
                 with contextlib.suppress(Exception):
-                    on_response(response)
-            if not _response_uses_https(response, update.url):
-                raise UpdateError("The update download URL must use HTTPS.")
-            while True:
-                _raise_if_cancelled(cancel_requested)
-                chunk = response.read(DOWNLOAD_CHUNK_SIZE)
-                _raise_if_cancelled(cancel_requested)
-                if not chunk:
-                    break
-                received += len(chunk)
-                if received > update.size:
-                    raise UpdateError("The downloaded update package is larger than expected.")
-                outFile.write(chunk)
-                digest.update(chunk)
-                if progress is not None:
-                    progress(received, update.size)
-                _raise_if_cancelled(cancel_requested)
-    except UpdateError:
-        with contextlib.suppress(OSError):
-            _remove_file_if_present(partialPath)
-        raise
-    except (OSError, http.client.HTTPException, ValueError) as exc:
-        with contextlib.suppress(OSError):
-            _remove_file_if_present(partialPath)
+                    on_response(None)
+        if received != update.size:
+            raise UpdateError("The downloaded update package size does not match the update manifest.")
         _raise_if_cancelled(cancel_requested)
-        raise UpdateError("Could not download the update package.") from exc
-    except Exception:
-        with contextlib.suppress(OSError):
-            _remove_file_if_present(partialPath)
+        if digest.hexdigest().casefold() != update.sha256.casefold():
+            raise UpdateError("The downloaded update package checksum does not match the update manifest.")
         _raise_if_cancelled(cancel_requested)
-        raise
+        try:
+            os.replace(os.fspath(partialPath), os.fspath(targetPath))
+            partialPath = None
+        except OSError as exc:
+            raise UpdateError("Could not finalize the downloaded update package.") from exc
     finally:
-        if on_response is not None:
-            with contextlib.suppress(Exception):
-                on_response(None)
-    if received != update.size:
-        with contextlib.suppress(OSError):
-            _remove_file_if_present(partialPath)
-        raise UpdateError("The downloaded update package size does not match the update manifest.")
-    try:
-        _raise_if_cancelled(cancel_requested)
-    except UpdateCancelled:
-        with contextlib.suppress(OSError):
-            _remove_file_if_present(partialPath)
-        raise
-    if digest.hexdigest().casefold() != update.sha256.casefold():
-        with contextlib.suppress(OSError):
-            _remove_file_if_present(partialPath)
-        raise UpdateError("The downloaded update package checksum does not match the update manifest.")
-    try:
-        _raise_if_cancelled(cancel_requested)
-    except UpdateCancelled:
-        with contextlib.suppress(OSError):
-            _remove_file_if_present(partialPath)
-        raise
-    try:
-        os.replace(os.fspath(partialPath), os.fspath(targetPath))
-    except OSError as exc:
-        with contextlib.suppress(OSError):
-            _remove_file_if_present(partialPath)
-        raise UpdateError("Could not finalize the downloaded update package.") from exc
+        if partialPath is not None:
+            with contextlib.suppress(OSError):
+                _remove_file_if_present(partialPath)
     try:
         _raise_if_cancelled(cancel_requested)
     except UpdateCancelled:
@@ -669,10 +688,16 @@ def cleanup_update_files() -> None:
     except FileNotFoundError:
         pass
     except OSError:
-        pass
+        log.debugWarning("Could not clean temporary Google TTS For NVDA update files.", exc_info=True)
 
 
 def format_size(size: int) -> str:
-    from .uiUtils import format_size_auto
-
+    try:
+        from .uiUtils import format_size_auto
+    except Exception:
+        if size >= 1024 * 1024:
+            return f"{size / (1024 * 1024):.1f} MB"
+        if size >= 1024:
+            return f"{size / 1024:.1f} KB"
+        return f"{size} bytes"
     return format_size_auto(size)

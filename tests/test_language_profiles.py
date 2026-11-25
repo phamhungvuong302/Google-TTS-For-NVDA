@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import unittest
 from typing import Any
+from unittest import mock
 
 from tests.test_support import load_driver_module
 
@@ -67,6 +68,19 @@ class LanguageUtilsTests(unittest.TestCase):
         self.assertEqual(self.language_utils.get_language_display_name("vi-VN", custom_names), "Tiếng Việt")
         self.assertEqual(self.language_utils.get_language_display_name("en_us", custom_names), "English (US)")
         self.assertEqual(self.language_utils.get_language_display_name("fr-FR", custom_names), "fr-FR")
+
+    def test_get_language_display_name_uses_shared_language_names(self) -> None:
+        self.assertEqual(self.language_utils.get_language_display_name("vi-VN"), "Vietnamese")
+        self.assertEqual(self.language_utils.get_language_display_name("vi_vn"), "Vietnamese")
+        self.assertEqual(self.language_utils.get_language_display_name("yue-HK"), "Cantonese")
+        self.assertEqual(self.language_utils.get_language_display_name("nl-BE"), "Flemish")
+        self.assertEqual(self.language_utils.get_language_display_name("xx-YY"), "xx-YY")
+
+    def test_visible_language_sort_key_uses_locale_sort_rules(self) -> None:
+        with mock.patch.object(self.language_utils, "_current_ui_language", return_value="vi_VN"):
+            names = ["Tiếng Việt", "Tiếng Đan Mạch", "Tiếng Anh", "Tiếng Do Thái"]
+            sortedNames = sorted(names, key=self.language_utils.visible_language_sort_key)
+        self.assertEqual(["Tiếng Anh", "Tiếng Do Thái", "Tiếng Đan Mạch", "Tiếng Việt"], sortedNames)
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +262,7 @@ class LanguageProfilesTests(unittest.TestCase):
         samples = [
             ("\u029c\u1d07\u029f\u029f\u1d0f \u029f\u1d00\u0274\u0262", "hello lang"),  # Phonetic Small Capitals
             ("ʜᴇʟʟᴏ ᴡᴏʀʟᴅ", "hello world"),  # Latin Small Capitals
-            ("\u249cpple", "apple"),  # Parenthesized small letters (no parentheses for speech)
+            ("\u249clpha", "alpha"),  # Parenthesized small letters (no parentheses for speech)
             ("⒜ ⒝ ⒞", "a b c"),
             ("\U0001f157\U0001f154\U0001f15b\U0001f15b\U0001f15e", "HELLO"),  # Negative circled letters
             ("🅐 🅑 🅒 🅰 🅱 🆎 🄰 🄱 🄲 🆗", "A B C A B AB A B C OK"),  # Circled, squared, and squared words
@@ -886,7 +900,7 @@ class LanguageProfilesTests(unittest.TestCase):
             ),
         )
 
-        for english_text in ("I, Alice, agree with this.", "A: Introduction to Algorithms"):
+        for english_text in ("I, Alice, agree with this.", "A: Introduction to Computing"):
             with self.subTest(english_text=english_text):
                 self.assertEqual(
                     [(english_text, "en-US")],

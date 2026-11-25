@@ -218,12 +218,24 @@ class EngineCaptureUnderLockTests(unittest.TestCase):
         self.assertEqual(0, replacement_engine.speak_calls)
 
     def test_stop_runtime_uses_captured_engine(self) -> None:
-        """stop_runtime() captures engine under lock."""
+        """stop_runtime() captures engine under lock when connected."""
         engine = FakeEngine()
-        bridge_instance = make_fake_bridge(engine=engine)
+        cdp = FakeCdpClient()
+        cdp.connected = True
+        bridge_instance = make_fake_bridge(engine=engine, cdp_client=cdp)
 
         bridge_instance.stop_runtime()
         self.assertEqual(1, engine.stop_calls)
+
+    def test_stop_runtime_skips_when_disconnected(self) -> None:
+        """stop_runtime() is a no-op when the browser runtime is not connected."""
+        engine = FakeEngine()
+        cdp = FakeCdpClient()
+        cdp.connected = False
+        bridge_instance = make_fake_bridge(engine=engine, cdp_client=cdp)
+
+        bridge_instance.stop_runtime()
+        self.assertEqual(0, engine.stop_calls)
 
     def test_cancel_current_uses_captured_engine(self) -> None:
         """cancel_current() captures engine under lock."""
@@ -388,6 +400,113 @@ class CdpDispatcherDisconnectTests(unittest.TestCase):
         late_event = dispatcher.register_request(999)
         self.assertTrue(late_event.is_set())
 
+    def test_dispatcher_ignores_non_dict_json_frames(self) -> None:
+        class _MixedWs:
+            def __init__(self) -> None:
+                self.connected = True
+                self._frames = ["123", '["not-a-dict"]', '{"id": 1, "result": {"ok": true}}', ""]
+                self.sent = threading.Event()
+
+            def send(self, _payload: str) -> None:
+                self.sent.set()
+
+            def recv(self) -> str:
+                self.sent.wait(timeout=2)
+                return self._frames.pop(0) if self._frames else ""
+
+        client = bridge.CdpClient()
+        ws = _MixedWs()
+        dispatcher = bridge.CdpDispatcher(ws)
+        dispatcher.start()
+        client._ws = ws
+        client._dispatcher = dispatcher
+        try:
+            response = client.request("Runtime.enable", timeout=2.0)
+            self.assertEqual({"id": 1, "result": {"ok": True}}, response)
+        finally:
+            dispatcher.stop()
+
+    def test_cdp_client_connect_releases_lock_cleans_up_errors_and_honors_concurrent_close(self) -> None:
+        # 1. Partial init failure (settimeout raises) closes the newly created websocket.
+        clientErr = bridge.CdpClient()
+        badWs = mock.MagicMock()
+        badWs.settimeout.side_effect = OSError("settimeout failed")
+        with (
+            mock.patch.object(bridge.websocket, "create_connection", return_value=badWs),
+            self.assertRaises(OSError),
+        ):
+            clientErr.connect("ws://127.0.0.1:9222/page")
+        badWs.close.assert_called_once()
+        self.assertIsNone(clientErr.ws)
+
+        # 2. Concurrent close() while create_connection() blocks does not deadlock and aborts with CdpCancelled.
+        clientRace = bridge.CdpClient()
+        enteredConnect = threading.Event()
+        releaseConnect = threading.Event()
+        createdWs = mock.MagicMock(connected=True)
+
+        def blocking_create(*args: Any, **kwargs: Any) -> Any:
+            enteredConnect.set()
+            releaseConnect.wait(timeout=5)
+            return createdWs
+
+        connectOutcome: list[BaseException | None] = []
+
+        def run_connect() -> None:
+            try:
+                with (
+                    mock.patch.object(bridge.websocket, "create_connection", side_effect=blocking_create),
+                    mock.patch.object(bridge, "CdpDispatcher", return_value=mock.MagicMock()),
+                ):
+                    clientRace.connect("ws://127.0.0.1:9222/page")
+                connectOutcome.append(None)
+            except BaseException as exc:
+                connectOutcome.append(exc)
+
+        t = threading.Thread(target=run_connect)
+        t.start()
+        self.assertTrue(enteredConnect.wait(timeout=2))
+        t0 = time.monotonic()
+        clientRace.close()
+        self.assertLess(time.monotonic() - t0, 1.0, "close() must not block on create_connection()")
+        releaseConnect.set()
+        t.join(timeout=2)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(1, len(connectOutcome))
+        self.assertIsInstance(connectOutcome[0], bridge.CdpCancelled)
+        createdWs.close.assert_called_once()
+        self.assertIsNone(clientRace.ws)
+
+    def test_cdp_client_request_checks_stopped_dispatcher_and_invokes_cancel_callback_on_timeout(self) -> None:
+        # 1. Stopped dispatcher fails immediately without calling send().
+        clientStopped = bridge.CdpClient()
+        stoppedDispatcher = mock.MagicMock()
+        stoppedDispatcher._stopped.is_set.return_value = True
+        clientStopped._ws = mock.MagicMock(connected=True)
+        clientStopped._dispatcher = stoppedDispatcher
+        with self.assertRaises(bridge.CdpError):
+            clientStopped.request("Runtime.evaluate", {"expression": "1"})
+        stoppedDispatcher.send.assert_not_called()
+
+        # 2. Timeout calls onCancelCallback so Chromium stops synthesizing.
+        clientTimeout = bridge.CdpClient()
+        dispatcher = mock.MagicMock()
+        dispatcher._stopped.is_set.return_value = False
+        dispatcher.register_request.return_value = threading.Event()
+        dispatcher.unregister_request.return_value = (None, None)
+        clientTimeout._ws = mock.MagicMock(connected=True)
+        clientTimeout._dispatcher = dispatcher
+        cancelCalls: list[int] = []
+        with self.assertRaises(bridge.CdpError) as errCtx:
+            clientTimeout.request(
+                "Runtime.evaluate",
+                {"expression": "1"},
+                timeout=0.02,
+                onCancelCallback=lambda: cancelCalls.append(1),
+            )
+        self.assertIn("Timed out waiting for Runtime.evaluate", errCtx.exception.technicalDetail or "")
+        self.assertEqual([1], cancelCalls)
+
 
 # ---------------------------------------------------------------------------
 # Test 4: ensure_connection cancellation does not terminate process manager
@@ -465,6 +584,144 @@ class EnsureConnectionCancellationTests(unittest.TestCase):
         self.assertTrue(cdp.is_connected())
         self.assertFalse(pm._terminated, "Process manager should not be terminated by cancelled warmup")
         self.assertTrue(any(isinstance(e, bridge.CdpCancelled) for e in errors))
+
+    def test_ensure_connection_does_not_retry_when_start_and_get_websocket_url_already_failed(self) -> None:
+        pm = FakeProcessManager()
+        pm._urls = []
+        pm.profile_runtime = "edge"
+        cdp = FakeCdpClient()
+        bridge_instance = make_fake_bridge(cdp_client=cdp, process_manager=pm)
+
+        with (
+            mock.patch.object(bridge, "_browser_choices", return_value=(("chrome", "chrome.exe"),)),
+            self.assertRaises(bridge.CdpError),
+        ):
+            bridge_instance.ensure_connection()
+
+        self.assertEqual(1, pm._started_count)
+
+    def test_terminate_unblocks_ensure_connection_and_suppresses_spurious_fallback(self) -> None:
+        pm = FakeProcessManager(urls=["ws://first:1", "ws://second:1"])
+        cdp = FakeCdpClient()
+        bridge_instance = make_fake_bridge(cdp_client=cdp, process_manager=pm)
+        entered = threading.Event()
+        logCalls: list[Any] = []
+        pm._log_browser_runtime_failure = lambda *args: logCalls.append(args)  # type: ignore[method-assign]
+
+        def slow_start(*, cancelEvent: Any = None, skipRuntimes: Any = None) -> str:
+            entered.set()
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                if cancelEvent is not None and cancelEvent.is_set():
+                    raise bridge.CdpCancelled()
+                time.sleep(0.01)
+            return "ws://first:1"
+
+        pm.start_and_get_websocket_url = slow_start  # type: ignore[method-assign]
+        outcomes: list[BaseException | None] = []
+
+        def run_ensure() -> None:
+            try:
+                bridge_instance.ensure_connection()
+                outcomes.append(None)
+            except BaseException as exc:
+                outcomes.append(exc)
+
+        t = threading.Thread(target=run_ensure)
+        t.start()
+        self.assertTrue(entered.wait(timeout=2))
+        t0 = time.monotonic()
+        bridge_instance.terminate()
+        t.join(timeout=2)
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(1, len(outcomes))
+        self.assertIsInstance(outcomes[0], bridge.CdpCancelled)
+        self.assertEqual([], logCalls)
+
+    def test_queued_ensure_connection_aborts_when_terminate_runs_while_waiting_on_lock(self) -> None:
+        pm = FakeProcessManager(urls=["ws://first:1", "ws://should-not-launch:2"])
+        cdp = FakeCdpClient()
+        bridge_instance = make_fake_bridge(cdp_client=cdp, process_manager=pm)
+        firstEntered = threading.Event()
+        startCalls: list[int] = []
+
+        def slow_start(*, cancelEvent: Any = None, skipRuntimes: Any = None) -> str:
+            startCalls.append(1)
+            firstEntered.set()
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                if cancelEvent is not None and cancelEvent.is_set():
+                    raise bridge.CdpCancelled()
+                time.sleep(0.01)
+            return "ws://first:1"
+
+        pm.start_and_get_websocket_url = slow_start  # type: ignore[method-assign]
+        outcomes: list[tuple[str, BaseException | None]] = []
+
+        def run_caller(label: str) -> None:
+            try:
+                bridge_instance.ensure_connection()
+                outcomes.append((label, None))
+            except BaseException as exc:
+                outcomes.append((label, exc))
+
+        t1 = threading.Thread(target=run_caller, args=("first",))
+        t1.start()
+        self.assertTrue(firstEntered.wait(timeout=2))
+
+        t2 = threading.Thread(target=run_caller, args=("queued",))
+        t2.start()
+        time.sleep(0.05)
+
+        bridge_instance.terminate()
+        t1.join(timeout=2)
+        t2.join(timeout=2)
+        self.assertFalse(t1.is_alive())
+        self.assertFalse(t2.is_alive())
+        self.assertEqual(1, len(startCalls), "Queued caller must not launch a browser after terminate()")
+        self.assertEqual(2, len(outcomes))
+        for _label, exc in outcomes:
+            self.assertIsInstance(exc, bridge.CdpCancelled)
+
+    def test_ensure_connection_cancel_stops_replaced_process_and_update_catalog_marks_inflight_connect(self) -> None:
+        # 1. If start_and_get_websocket_url replaced an existing process and then cancel fires, stop the new process.
+        oldProc = mock.MagicMock()
+        oldProc.poll.return_value = None
+        newProc = mock.MagicMock()
+        newProc.poll.return_value = None
+
+        pm = FakeProcessManager(urls=["ws://new:1"])
+        pm.chrome_process = oldProc  # type: ignore[attr-defined]
+        stopCalls: list[bool] = []
+
+        def record_stop(*, removeProfile: bool = False) -> None:
+            stopCalls.append(removeProfile)
+
+        pm.stop_browser_process = record_stop  # type: ignore[method-assign]
+
+        cancel = threading.Event()
+
+        def replace_and_return(*, cancelEvent: Any = None, skipRuntimes: Any = None) -> str:
+            pm.chrome_process = newProc  # type: ignore[attr-defined]
+            cancel.set()
+            return "ws://new:1"
+
+        pm.start_and_get_websocket_url = replace_and_return  # type: ignore[method-assign]
+        bridge_instance = make_fake_bridge(cdp_client=FakeCdpClient(), process_manager=pm)
+        with self.assertRaises(bridge.CdpCancelled):
+            bridge_instance.ensure_connection(cancelEvent=cancel)
+        self.assertEqual([False], stopCalls)
+
+        # 2. update_catalog() during an in-flight ensure_connection() still marks recycle even before chrome_process exists.
+        b2 = make_fake_bridge(cdp_client=FakeCdpClient(), process_manager=FakeProcessManager())
+        b2._process_manager.chrome_process = None  # type: ignore[attr-defined]
+        b2._activeConnectCancelEvent = threading.Event()
+        b2._engine.runtime_busy = True  # defer immediate recycle so _needsRecycle stays inspectable
+        b2.catalog = bridge.VoiceCatalog([])
+        newCatalog = bridge.VoiceCatalog.load()
+        b2.update_catalog(newCatalog)
+        self.assertTrue(b2._needsRecycle)
 
 
 class _FailingEngine:
@@ -595,6 +852,25 @@ class RuntimeRecoveryTests(unittest.TestCase):
             expected_recycles=0,
         )
         self.assertTrue(bridge_inst._needsRecycle)
+
+    def test_speak_does_not_retry_when_ensure_connection_fails(self) -> None:
+        engine = FakeEngine()
+        bridge_inst = make_fake_bridge(engine=engine)
+        ensureCalls = 0
+
+        def failing_ensure(cancelEvent: Any = None) -> None:
+            nonlocal ensureCalls
+            ensureCalls += 1
+            raise bridge._friendly_cdp_error("Closed", "Browser DevTools websocket closed.")
+
+        bridge_inst.ensure_connection = failing_ensure
+        recycleCalls = self._install_recycle_spy(bridge_inst)
+        with self.assertRaises(bridge.CdpError):
+            bridge_inst.speak("text", {}, lambda _audio: None)
+        self.assertEqual(1, ensureCalls)
+        self.assertEqual(0, engine.speak_calls)
+        self.assertEqual([0], recycleCalls)
+        self.assertFalse(bridge_inst._needsRecycle)
 
     def test_only_healthy_connected_runtime_is_safe_for_standby(self) -> None:
         bridge_inst = _runtime_bridge(FakeEngine())

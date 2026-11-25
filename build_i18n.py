@@ -96,11 +96,11 @@ POEDIT_MSGMERGE_RELATIVE_PATH = Path("Poedit") / "GettextTools" / "bin" / "msgme
 POEDIT_MSGFMT_RELATIVE_PATH = Path("Poedit") / "GettextTools" / "bin" / "msgfmt.exe"
 MANIFEST_KEYS = ("summary", "description", "changelog")
 PLACEHOLDER_RE = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
-# Unnamed percent interpolations (e.g. %s, %d, %10.2f, %-5s, but not %% or 50%+a)
+# Unnamed percent interpolations (e.g. %s, %d, %10.2f, %-5s, % d, but not %% or 50%+a)
 RE_UNNAMED_PERCENT = re.compile(
     r"""
     (?:(?<!\d)%|%(?![+-]))
-    [#0+-]*
+    [#0+\- ]*
     \d*
     (?:\.\d+)?
     [hlL]?
@@ -110,7 +110,7 @@ RE_UNNAMED_PERCENT = re.compile(
     flags=re.VERBOSE,
 )
 # Named percent interpolations (e.g. %(name)s, %(count)02d, %(name)-10s)
-RE_NAMED_PERCENT = re.compile(r"%\([^()]+\)[#0+\- ]*\d*(?:\.\d+)?[a-zA-Z]")
+RE_NAMED_PERCENT = re.compile(r"%\([^()]+\)[#0+\- ]*\d*(?:\.\d+)?[hlL]?[diouxXeEfFgGcrsa]")
 # Brace format interpolations (e.g. {name}, {name!r}, {name:format}, {0})
 RE_FORMAT = re.compile(r"\{([^{}:!]*)(?:![^{}:]*)?(?::[^{}]*)?\}")
 VOID_HTML_TAGS = frozenset({"br", "hr", "img", "input", "meta", "link"})
@@ -266,16 +266,64 @@ def _split_lf(text: str) -> list[str]:
     return normalized.split("\n")
 
 
+_PO_SIMPLE_ESCAPES = {
+    "\\": "\\",
+    '"': '"',
+    "'": "'",
+    "?": "?",
+    "a": "\a",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+}
+
+
 def _decode_po_string(token: str) -> str:
-    if not (token.startswith('"') and token.endswith('"')) or token.startswith('"""'):
+    if len(token) < 2 or not (token.startswith('"') and token.endswith('"')) or token.startswith('"""'):
         raise ValueError(f"malformed PO string {token!r}: expected double-quoted string")
-    try:
-        val = ast.literal_eval(token)
-        if not isinstance(val, str):
-            raise ValueError(f"expected str literal, got {type(val).__name__}")
-        return val
-    except (SyntaxError, ValueError) as exc:
-        raise ValueError(f"malformed PO string {token!r}: {exc}") from exc
+    inner = token[1:-1]
+    out: list[str] = []
+    idx = 0
+    length = len(inner)
+    while idx < length:
+        ch = inner[idx]
+        if ch in ('"', "\n", "\r"):
+            raise ValueError(f"malformed PO string {token!r}: unescaped {ch!r}")
+        if ch != "\\":
+            out.append(ch)
+            idx += 1
+            continue
+        idx += 1
+        if idx >= length:
+            raise ValueError(f"malformed PO string {token!r}: trailing backslash")
+        esc = inner[idx]
+        if esc in _PO_SIMPLE_ESCAPES:
+            out.append(_PO_SIMPLE_ESCAPES[esc])
+            idx += 1
+        elif esc in "01234567":
+            end = idx + 1
+            while end < length and end - idx < 3 and inner[end] in "01234567":
+                end += 1
+            val = int(inner[idx:end], 8)
+            if val > 0xFF:
+                raise ValueError(f"malformed PO string {token!r}: octal escape out of range")
+            out.append(chr(val))
+            idx = end
+        elif esc == "x":
+            hex_start = idx + 1
+            hex_end = hex_start
+            while hex_end < length and hex_end - hex_start < 2 and inner[hex_end] in "0123456789abcdefABCDEF":
+                hex_end += 1
+            if hex_end == hex_start:
+                raise ValueError(f"malformed PO string {token!r}: invalid hex escape")
+            out.append(chr(int(inner[hex_start:hex_end], 16)))
+            idx = hex_end
+        else:
+            raise ValueError(f"malformed PO string {token!r}: unknown escape \\{esc}")
+    return "".join(out)
 
 
 def _match_po_keyword(line: str, keyword: str) -> str | None:
@@ -365,12 +413,14 @@ def _iter_po_records(path: Path) -> list[tuple[str | None, str, str, bool]]:
             if not has_msgid:
                 raise ValueError(f"msgstr[...] without msgid in PO file {path.name}: {line!r}")
             plural_idx = int(plural_match.group(1))
+            if plural_idx == 0 and has_msgstr_zero:
+                raise ValueError(f"duplicate msgstr[0] in PO file {path.name}: {line!r}")
             active = "msgstr_0" if plural_idx == 0 else "msgstr_plural"
             has_msgstr = True
             rest = (plural_match.group(2) or "").strip()
             if rest:
                 decoded = _decode_po_string(rest)
-                if plural_idx == 0 and not has_msgstr_zero:
+                if plural_idx == 0:
                     plural_parts.append(decoded)
             if plural_idx == 0:
                 has_msgstr_zero = True
@@ -393,6 +443,8 @@ def _iter_po_records(path: Path) -> list[tuple[str | None, str, str, bool]]:
         if (rest := _match_po_keyword(line, "msgstr")) is not None:
             if not has_msgid:
                 raise ValueError(f"msgstr without preceding msgid in PO file {path.name}: {line!r}")
+            if has_msgstr:
+                raise ValueError(f"duplicate msgstr in PO file {path.name}: {line!r}")
             active = "msgstr"
             has_msgstr = True
             if rest:
@@ -593,23 +645,6 @@ def _merge_po_header(
     if not old_header_str:
         return _build_po_header(comments=comments or fallback_comments, language=language)
 
-    header_dict: dict[str, str] = {}
-    for hline in _split_lf(old_header_str):
-        if ":" in hline:
-            k, v = hline.split(":", 1)
-            header_dict[k.strip()] = v.strip()
-
-    header_dict["Project-Id-Version"] = f"Google TTS For NVDA {version}"
-    header_dict.setdefault("Report-Msgid-Bugs-To", "")
-    header_dict.setdefault("POT-Creation-Date", "YEAR-MO-DA HO:MI+ZONE")
-    header_dict.setdefault("PO-Revision-Date", "YEAR-MO-DA HO:MI+ZONE")
-    header_dict.setdefault("Last-Translator", "FULL NAME <EMAIL@ADDRESS>")
-    header_dict.setdefault("Language-Team", "LANGUAGE <LL@li.org>")
-    header_dict["Language"] = language
-    header_dict["MIME-Version"] = "1.0"
-    header_dict["Content-Type"] = "text/plain; charset=UTF-8"
-    header_dict["Content-Transfer-Encoding"] = "8bit"
-
     ordered_keys = [
         "Project-Id-Version",
         "Report-Msgid-Bugs-To",
@@ -623,6 +658,25 @@ def _merge_po_header(
         "Content-Transfer-Encoding",
         "Plural-Forms",
     ]
+    canonical_keys = {key.casefold(): key for key in ordered_keys}
+    header_dict: dict[str, str] = {}
+    for hline in _split_lf(old_header_str):
+        if ":" in hline:
+            k, v = hline.split(":", 1)
+            raw_key = k.strip()
+            header_dict[canonical_keys.get(raw_key.casefold(), raw_key)] = v.strip()
+
+    header_dict["Project-Id-Version"] = f"Google TTS For NVDA {version}"
+    header_dict.setdefault("Report-Msgid-Bugs-To", "")
+    header_dict.setdefault("POT-Creation-Date", "YEAR-MO-DA HO:MI+ZONE")
+    header_dict.setdefault("PO-Revision-Date", "YEAR-MO-DA HO:MI+ZONE")
+    header_dict.setdefault("Last-Translator", "FULL NAME <EMAIL@ADDRESS>")
+    header_dict.setdefault("Language-Team", "LANGUAGE <LL@li.org>")
+    header_dict["Language"] = language
+    header_dict["MIME-Version"] = "1.0"
+    header_dict["Content-Type"] = "text/plain; charset=UTF-8"
+    header_dict["Content-Transfer-Encoding"] = "8bit"
+
     for k in ordered_keys:
         if k in header_dict:
             lines.append(f'"{_po_escape(k)}: {_po_escape(header_dict[k])}\\n"')
@@ -697,10 +751,55 @@ def _run_msgfmt_command(msgfmt_path: Path, output_path: Path, po_path: Path) -> 
 
 def _po_has_charset(po_path: Path) -> bool:
     try:
-        content = po_path.read_text(encoding="utf-8-sig", errors="replace")
-        return "charset=" in content.lower()
-    except Exception:
+        lines = po_path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
         return False
+    in_header_msgid = False
+    in_header_msgstr = False
+    header_parts: list[str] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            if in_header_msgstr:
+                break
+            continue
+        if line.startswith("#"):
+            if in_header_msgstr:
+                break
+            continue
+        if not in_header_msgid:
+            if re.match(r"^msgid(?:\s|$)", line):
+                rest = line[len("msgid") :].strip()
+                if rest in ("", '""'):
+                    in_header_msgid = True
+                    continue
+            return False
+        if not in_header_msgstr:
+            if line.startswith('"'):
+                try:
+                    if _decode_po_string(line) != "":
+                        return False
+                except ValueError:
+                    return False
+                continue
+            if re.match(r"^msgstr(?:\s|$)", line):
+                in_header_msgstr = True
+                rest = line[len("msgstr") :].strip()
+                if rest:
+                    try:
+                        header_parts.append(_decode_po_string(rest))
+                    except ValueError:
+                        return False
+                continue
+            return False
+        if line.startswith('"'):
+            try:
+                header_parts.append(_decode_po_string(line))
+            except ValueError:
+                return False
+            continue
+        break
+    return "charset=" in "".join(header_parts).lower()
 
 
 def _check_po_syntax_with_msgfmt(
@@ -752,8 +851,6 @@ def _check_po_syntax_fallback(po_path: Path) -> list[str]:
     seen_keys: set[tuple[str | None, str]] = set()
     try:
         for ctx, msgid, _msgstr, _fuzzy in _iter_po_records(po_path):
-            if not msgid:
-                continue
             key = (ctx, msgid)
             if key in seen_keys:
                 errors.append(f"{po_path.name}: duplicate message definition for {_message_preview(msgid)!r}")
@@ -764,7 +861,8 @@ def _check_po_syntax_fallback(po_path: Path) -> list[str]:
     return errors
 
 
-_OBSOLETE_START_RE = re.compile(r"^#~\s*(?:msgctxt|msgid)\b")
+_OBSOLETE_MSGID_RE = re.compile(r"^#~\s*msgid\b")
+_OBSOLETE_MSGCTXT_RE = re.compile(r"^#~\s*msgctxt\b")
 
 
 def _purge_obsolete_po_entries(text: str) -> tuple[str, int]:
@@ -776,23 +874,29 @@ def _purge_obsolete_po_entries(text: str) -> tuple[str, int]:
     removed = 0
     for paragraph in paragraphs:
         lines = paragraph.split("\n")
-        obs_start_indices = [
-            idx for idx, line in enumerate(lines) if line.startswith("#~") and _OBSOLETE_START_RE.match(line)
-        ]
-        if obs_start_indices:
-            has_active_entry = any(
-                not line.startswith("#") and line.strip() != "" for line in lines[: obs_start_indices[0]]
-            )
-            if has_active_entry:
-                cut_idx = obs_start_indices[0]
-                while cut_idx > 0 and lines[cut_idx - 1].startswith(("#~", "#,", "#.")):
-                    cut_idx -= 1
-                kept.append("\n".join(lines[:cut_idx]))
-                removed += len(obs_start_indices)
-            else:
-                removed += max(1, len(obs_start_indices))
+        if not any(line.startswith("#~") for line in lines):
+            kept.append(paragraph)
             continue
-        kept.append(paragraph)
+        obs_msgids = sum(1 for line in lines if _OBSOLETE_MSGID_RE.match(line))
+        if obs_msgids:
+            removed += obs_msgids
+        elif any(_OBSOLETE_MSGCTXT_RE.match(line) for line in lines):
+            removed += 1
+        kept_lines: list[str] = []
+        pending_comments: list[str] = []
+        for line in lines:
+            if line.startswith("#~"):
+                pending_comments.clear()
+                continue
+            if line.startswith("#"):
+                pending_comments.append(line)
+                continue
+            if pending_comments:
+                kept_lines.extend(pending_comments)
+                pending_comments.clear()
+            kept_lines.append(line)
+        if kept_lines:
+            kept.append("\n".join(kept_lines))
     if not kept:
         return "", removed
     return "\n\n".join(kept).rstrip() + "\n", removed
@@ -1040,12 +1144,24 @@ def _get_interpolations(text: str) -> tuple[list[str], set[str], set[str], int]:
     return unnamed_percent, named_percent, brace_formats, unnumbered_count[0]
 
 
+def _has_malformed_braces(text: str) -> bool:
+    try:
+        for _ in string.Formatter().parse(text):
+            pass
+    except ValueError:
+        return True
+    return False
+
+
 def _check_format_interpolations(msgid: str, msgstr: str) -> list[str]:
     if not msgstr.strip():
         return []
     id_unnamed, id_named, id_braces, id_empty = _get_interpolations(msgid)
     str_unnamed, str_named, str_braces, str_empty = _get_interpolations(msgstr)
     alerts: list[str] = []
+
+    if (id_braces or id_empty) and not _has_malformed_braces(msgid) and _has_malformed_braces(msgstr):
+        alerts.append("malformed brace format string: unmatched '{' or '}'")
 
     if id_unnamed != str_unnamed:
         if id_unnamed:
@@ -1083,7 +1199,8 @@ def _check_html_tag_interpolations(msgid: str, msgstr: str) -> list[str]:
 
     open_comments = len(re.findall(r"<!--", msgstr))
     close_comments = len(re.findall(r"-->", msgstr))
-    if open_comments != close_comments:
+    msgid_close_comments = len(re.findall(r"-->", msgid))
+    if open_comments != close_comments and (open_comments > 0 or close_comments != msgid_close_comments):
         alerts.append(f"unbalanced HTML comment: {open_comments} open vs {close_comments} close")
 
     msgid_clean = HTML_COMMENT_RE.sub("", msgid)
@@ -1093,9 +1210,9 @@ def _check_html_tag_interpolations(msgid: str, msgstr: str) -> list[str]:
     close_tags = CLOSE_HTML_TAG_RE.findall(msgstr_clean)
 
     # 1. Disallowed dangerous tags and event handlers check
-    for tag in open_tags + close_tags:
-        if tag.lower() in DANGEROUS_HTML_TAGS:
-            alerts.append(f"disallowed HTML tag: <{tag.lower()}>")
+    for tag in sorted({t.lower() for t in open_tags + close_tags}):
+        if tag in DANGEROUS_HTML_TAGS:
+            alerts.append(f"disallowed HTML tag: <{tag}>")
 
     found_event_handler = False
     found_inline_style = False
@@ -1317,7 +1434,13 @@ def _compile_mo_file(
         tmp_mo: Path | None = None
         try:
             output_mo_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_mo = output_mo_path.with_name(f".tmp-{output_mo_path.name}")
+            with tempfile.NamedTemporaryFile(
+                dir=output_mo_path.parent,
+                prefix=f".tmp-{output_mo_path.name}.",
+                suffix=".mo",
+                delete=False,
+            ) as tmp_handle:
+                tmp_mo = Path(tmp_handle.name)
             res = _run_msgfmt_command(actual_msgfmt, tmp_mo, po_path)
             if res.returncode == 0 and tmp_mo.is_file():
                 tmp_mo.replace(output_mo_path)
@@ -1422,10 +1545,19 @@ def _supported_nvda_languages_from_dirs(locale_dirs: list[Path]) -> tuple[set[st
 
 
 def _normalize_language_code(language: str) -> str:
-    parts = language.strip().replace("-", "_").split("_", 1)
-    if len(parts) == 1:
-        return parts[0].lower()
-    return f"{parts[0].lower()}_{parts[1].upper()}"
+    raw = language.strip().replace("-", "_")
+    if not raw:
+        return ""
+    parts = [part for part in raw.split("_") if part]
+    if not parts:
+        return ""
+    normalized: list[str] = [parts[0].lower()]
+    for part in parts[1:]:
+        if len(part) == 4 and part.isalpha():
+            normalized.append(part.title())
+        else:
+            normalized.append(part.upper())
+    return "_".join(normalized)
 
 
 _WINDOWS_RESERVED_DIR_NAMES = frozenset(
@@ -1456,7 +1588,7 @@ def _resolve_target_directories(
                 if (
                     norm in (".", "..")
                     or _INVALID_LOCALE_DIR_CHARS_RE.search(norm)
-                    or norm.rstrip(".").upper() in _WINDOWS_RESERVED_DIR_NAMES
+                    or norm.split(".", 1)[0].rstrip(".").upper() in _WINDOWS_RESERVED_DIR_NAMES
                 ):
                     errors.append(f"{norm}: invalid language code.")
                     continue
@@ -1657,6 +1789,7 @@ class _BaseDocHtmlParser(HTMLParser):
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag_lower = tag.lower()
+        _close_optional_doc_tags(self.stack, tag_lower, self._flush_segment)
         attr_str = _format_html_attrs(attrs)
         rendered = f"<{tag}{attr_str}>" if tag_lower in ALL_VOID_HTML_TAGS else f"<{tag}{attr_str}></{tag}>"
         if self._in_translatable():
@@ -1909,7 +2042,6 @@ def _extract_po_from_doc_html(en_html_path: Path, lang_html_path: Path, language
         _atomic_write_text(output_po_path, "\n".join(lines) + "\n", prefix=".extract-po-")
         return True
     except Exception:
-        output_po_path.unlink(missing_ok=True)
         return False
 
 
@@ -2316,7 +2448,6 @@ class _DocHtmlToMarkdown(HTMLParser):
         self.table_rows: list[list[str]] = []
         self.table_alignments: list[str | None] = []
         self.current_table_row: list[str] = []
-        self.in_caption: bool = False
 
     def _in_cell(self) -> bool:
         return "td" in self.stack or "th" in self.stack
@@ -2341,6 +2472,7 @@ class _DocHtmlToMarkdown(HTMLParser):
         if not self.in_inline_code:
             return
         self.in_inline_code = False
+        self._pop_stack_to("code")
         code_text = "".join(self.inline_code_buf)
         self.inline_code_buf = []
         self.current_buf.append(_format_inline_code_span(code_text))
@@ -2528,8 +2660,6 @@ class _DocHtmlToMarkdown(HTMLParser):
                 pending = self._flush_buf().strip()
                 if pending:
                     self.output.append(f"\n\n{pending}\n\n")
-            if tag_lower == "caption":
-                self.in_caption = True
             if tag_lower not in ALL_VOID_HTML_TAGS:
                 self.stack.append(tag_lower)
             return
@@ -2651,8 +2781,9 @@ class _DocHtmlToMarkdown(HTMLParser):
             self._close_inline_code()
 
         if tag_lower == "a":
-            href = self.link_stack.pop() if self.link_stack else None
-            self._pop_stack_to("a")
+            href = self.link_stack[-1] if self.link_stack else None
+            if not self._pop_stack_to("a") and self.link_stack:
+                self.link_stack.pop()
             if href is not None and not self.in_inline_code:
                 self.current_buf.append(f"]({href})")
             return
@@ -2715,7 +2846,6 @@ class _DocHtmlToMarkdown(HTMLParser):
             if not self.list_stack:
                 self.output.append("\n")
         elif tag_lower == "caption":
-            self.in_caption = False
             if in_cell:
                 return
             text = self._flush_buf().strip()
@@ -2767,7 +2897,7 @@ class _DocHtmlToMarkdown(HTMLParser):
     def handle_entityref(self, name: str) -> None:
         if self.in_pre:
             self.pre_buf.append(html.unescape(f"&{name};"))
-        elif self.in_inline_code or "code" in self.stack:
+        elif self.in_inline_code:
             self.inline_code_buf.append(html.unescape(f"&{name};"))
         elif name in self._PRESERVED_PROSE_ENTITIES:
             self.current_buf.append(f"&{name};")
@@ -2778,7 +2908,7 @@ class _DocHtmlToMarkdown(HTMLParser):
         ch = html.unescape(f"&#{name};")
         if self.in_pre:
             self.pre_buf.append(ch)
-        elif self.in_inline_code or "code" in self.stack:
+        elif self.in_inline_code:
             self.inline_code_buf.append(ch)
         else:
             self.current_buf.append(self._CHARREF_PROSE_ESCAPES.get(ch, ch))
@@ -3411,7 +3541,7 @@ def _markdown_to_doc_html(
     is_rtl: bool | None = None,
     title: str | None = None,
 ) -> str:
-    """Convert Markdown to complete accessible documentation HTML."""
+    """Convert Markdown to documentation HTML."""
     if is_rtl is None:
         is_rtl = _is_rtl_language(language)
 
@@ -3744,6 +3874,11 @@ def _check_language_sort_file(language_dir: Path) -> list[str]:
                 errors.append(f"{language}: languageSort.json letterOrder[{index}] must be a non-empty string.")
                 continue
             normalized_item = unicodedata.normalize("NFC", item.casefold())
+            if len(normalized_item) != 1:
+                errors.append(
+                    f"{language}: languageSort.json letterOrder[{index}] must normalize to a single character."
+                )
+                continue
             if normalized_item in seen_letters:
                 errors.append(f"{language}: languageSort.json repeats letter {item!r} in letterOrder.")
             seen_letters.add(normalized_item)

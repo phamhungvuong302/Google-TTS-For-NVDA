@@ -34,8 +34,8 @@ venv/
 env/
 .env/
 
-# Google TTS for NVDA specific exclusions (per project rules)
-# Never commit or package downloaded voice packages or temporary Chrome profiles
+# Google TTS For NVDA specific exclusions
+# Never commit or package downloaded voice packages or temporary browser profiles
 *.zvoice
 chromeProfiles/
 edgeProfiles/

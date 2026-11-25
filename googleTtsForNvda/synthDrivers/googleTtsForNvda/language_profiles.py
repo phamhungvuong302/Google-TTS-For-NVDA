@@ -10,7 +10,9 @@ import bisect
 import re
 import unicodedata
 from collections.abc import Callable, Collection
+from typing import Any
 
+from .language_utils import canonical_language_root, language_root
 from .unicode_data import (
     CLDR_ACTIVE_CURRENCIES,
     CLDR_UNIT_SYMBOLS,
@@ -50,7 +52,8 @@ _COMBINING_MARK_CLASS = _ranges_to_regex_class(COMBINING_MARK_RANGES)
 _WORD_SINGLE_RUN = rf"[^\W\d_]+(?:{_COMBINING_MARK_CLASS}+[^\W\d_]+)*{_COMBINING_MARK_CLASS}*"
 _WORD_CORE_PATTERN = rf"{_WORD_SINGLE_RUN}(?:[\u200c\u200d]{_WORD_SINGLE_RUN})*"
 
-_WORD_CONNECTOR_CHARS = "'’_\\-\u2010\u2011\u05be\u05f3\u05f4\u00b7\u22c5"
+_WORD_CONNECTOR_STRIP_CHARS = "'’_-\u2010\u2011\u05be\u05f3\u05f4\u00b7\u22c5"
+_WORD_CONNECTOR_REGEX_CHARS = "'’_\\-\u2010\u2011\u05be\u05f3\u05f4\u00b7\u22c5"
 _WORD_INTERNAL_CONNECTOR_CLASS = r"['’\u2010\u2011\u05be\u05f3\u05f4\u00b7\u22c5]"
 _WORD_TOKEN_PATTERN = (
     rf"{_WORD_CORE_PATTERN}"
@@ -59,7 +62,7 @@ _WORD_TOKEN_PATTERN = (
 )
 
 LANGUAGE_WORD_RE = re.compile(
-    rf"{_WORD_CORE_PATTERN}(?:[{_WORD_CONNECTOR_CHARS}]{_WORD_CORE_PATTERN})*\u05f3?",
+    rf"{_WORD_CORE_PATTERN}(?:[{_WORD_CONNECTOR_REGEX_CHARS}]{_WORD_CORE_PATTERN})*\u05f3?",
     re.UNICODE,
 )
 _LATIN_NON_ASCII_EXEMPLARS: dict[str, frozenset[str]] = {
@@ -84,14 +87,19 @@ _CLOSING_PUNCT_STARTS: tuple[int, ...] = tuple(start for start, _ in CLOSING_PUN
 _OTHER_PUNCT_STARTS: tuple[int, ...] = tuple(start for start, _ in OTHER_PUNCTUATION_RANGES)
 
 
-def in_codepoint_ranges(cp: int, starts: tuple[int, ...], ranges: ScriptRanges) -> bool:
-    """Return True if *cp* falls inside a sorted, non-overlapping *(start, end)* tuple."""
+def lookup_codepoint_range(cp: int, starts: tuple[int, ...], ranges: tuple[Any, ...]) -> Any:
+    """Return the matching range entry from a sorted, non-overlapping *(start, end, ...)* tuple, or None."""
     idx = bisect.bisect_right(starts, cp) - 1
     if idx >= 0:
-        start, end = ranges[idx]
-        if start <= cp <= end:
-            return True
-    return False
+        entry = ranges[idx]
+        if entry[0] <= cp <= entry[1]:
+            return entry
+    return None
+
+
+def in_codepoint_ranges(cp: int, starts: tuple[int, ...], ranges: ScriptRanges) -> bool:
+    """Return True if *cp* falls inside a sorted, non-overlapping *(start, end)* tuple."""
+    return lookup_codepoint_range(cp, starts, ranges) is not None
 
 
 def is_combining_mark(cp: int) -> bool:
@@ -164,31 +172,45 @@ def is_punctuation_codepoint(cp: int) -> bool:
     return punctuation_subcategory_codepoint(cp).startswith("P")
 
 
-_ROOT_CANONICAL_ALIASES: dict[str, str] = {
-    "gom": "kok",
-    "iw": "he",
-    "ory": "or",
-    "pan": "pa",
+_LANGUAGE_SCRIPT_RANGES_SORTED: dict[str, ScriptRanges] = {
+    root: tuple(sorted(ranges)) for root, ranges in LANGUAGE_SCRIPT_RANGES.items()
+}
+_LANGUAGE_SCRIPT_STARTS: dict[str, tuple[int, ...]] = {
+    root: tuple(start for start, _ in ranges) for root, ranges in _LANGUAGE_SCRIPT_RANGES_SORTED.items()
 }
 
 
 def script_ranges_for_language_root(root: str) -> ScriptRanges:
-    return LANGUAGE_SCRIPT_RANGES.get(_ROOT_CANONICAL_ALIASES.get(root, root), ())
+    return LANGUAGE_SCRIPT_RANGES.get(canonical_language_root(root), ())
 
 
-def token_has_character_in_ranges(token: str, ranges: ScriptRanges) -> bool:
+def _sorted_script_ranges_for_language_root(root: str) -> tuple[ScriptRanges, tuple[int, ...]]:
+    canonical = canonical_language_root(root)
+    return _LANGUAGE_SCRIPT_RANGES_SORTED.get(canonical, ()), _LANGUAGE_SCRIPT_STARTS.get(canonical, ())
+
+
+def token_has_character_in_ranges(token: str, ranges: ScriptRanges, starts: tuple[int, ...] | None = None) -> bool:
+    if not ranges or not token:
+        return False
+    if starts is not None:
+        return any(in_codepoint_ranges(ord(character), starts, ranges) for character in token)
     return any(start <= ord(character) <= end for character in token for start, end in ranges)
 
 
 def language_script_signal(token: str, candidateRoots: Collection[str]) -> str | None:
     """Return the only candidate root whose generated script ranges match."""
-    matchingRoots = {
-        root
-        for root in candidateRoots
-        if (ranges := script_ranges_for_language_root(root)) and token_has_character_in_ranges(token, ranges)
-    }
+    matchingRoots: list[str] = []
+    seenCanonical: set[str] = set()
+    for root in candidateRoots:
+        canonical = canonical_language_root(root)
+        if canonical in seenCanonical:
+            continue
+        ranges, starts = _sorted_script_ranges_for_language_root(canonical)
+        if ranges and token_has_character_in_ranges(token, ranges, starts):
+            seenCanonical.add(canonical)
+            matchingRoots.append(root)
     if len(matchingRoots) == 1:
-        return next(iter(matchingRoots))
+        return matchingRoots[0]
     return None
 
 
@@ -199,20 +221,21 @@ def single_character_candidate_root(
 ) -> str | None:
     """Resolve the candidate root for a single character across unique or shared non-Latin scripts."""
     scriptSignal = language_script_signal(token, candidateRoots)
+    canonicalPref = canonical_language_root(preferredRoot) if preferredRoot else ""
     if scriptSignal:
-        return scriptSignal if scriptSignal != preferredRoot else None
+        return scriptSignal if canonical_language_root(scriptSignal) != canonicalPref else None
     firstLetter = next((ch for ch in token if is_letter_codepoint(ord(ch))), "")
     if not firstLetter:
         return None
     charScript = get_character_script(ord(firstLetter))
     if charScript == "Latin" or not charScript:
         return None
-    prefRanges = script_ranges_for_language_root(preferredRoot or "")
-    if prefRanges and token_has_character_in_ranges(token, prefRanges):
+    prefRanges, prefStarts = _sorted_script_ranges_for_language_root(preferredRoot or "")
+    if prefRanges and token_has_character_in_ranges(token, prefRanges, prefStarts):
         return None
     for root in candidateRoots:
-        ranges = script_ranges_for_language_root(root)
-        if ranges and token_has_character_in_ranges(token, ranges):
+        ranges, starts = _sorted_script_ranges_for_language_root(root)
+        if ranges and token_has_character_in_ranges(token, ranges, starts):
             return root
     return None
 
@@ -231,16 +254,16 @@ def single_grapheme_candidate_root(
     if not stripped or not candidateRoots:
         return None
     normalized = unicodedata.normalize("NFC", stripped)
+    canonicalPref = canonical_language_root(preferredRoot) if preferredRoot else ""
     scriptRoot = single_character_candidate_root(normalized, candidateRoots, preferredRoot)
-    if scriptRoot and scriptRoot != preferredRoot:
+    if scriptRoot and canonical_language_root(scriptRoot) != canonicalPref:
         return scriptRoot
     if not normalized.isascii():
         exemplarSignal = latin_exemplar_signal(normalized, candidateRoots)
         if (
             exemplarSignal
-            and exemplarSignal != preferredRoot
-            and _latin_exemplar_char_key(normalized)
-            not in _LATIN_NON_ASCII_EXEMPLARS.get(preferredRoot or "", frozenset())
+            and canonical_language_root(exemplarSignal) != canonicalPref
+            and _latin_exemplar_char_key(normalized) not in _LATIN_NON_ASCII_EXEMPLARS.get(canonicalPref, frozenset())
         ):
             return exemplarSignal
     return None
@@ -250,7 +273,15 @@ def latin_exemplar_signal(text: str, candidateRoots: Collection[str]) -> str | N
     """Return the winning Latin candidate root based on CLDR non-ASCII exemplar characters."""
     if not text or text.isascii():
         return None
-    latinRoots = [root for root in candidateRoots if root in _LATIN_NON_ASCII_EXEMPLARS]
+    # Deduplicate candidate roots by canonical root so duplicate/alias hints cannot dilute unique weights.
+    latinRoots: list[tuple[str, str]] = []
+    seenCanonical: set[str] = set()
+    for root in candidateRoots:
+        canonical = canonical_language_root(root)
+        if canonical in seenCanonical or canonical not in _LATIN_NON_ASCII_EXEMPLARS:
+            continue
+        seenCanonical.add(canonical)
+        latinRoots.append((root, canonical))
     if not latinRoots:
         return None
     normalized = unicodedata.normalize("NFC", text)
@@ -261,9 +292,9 @@ def latin_exemplar_signal(text: str, candidateRoots: Collection[str]) -> str | N
         nonAsciiChars.append(_latin_exemplar_char_key(char))
     if not nonAsciiChars:
         return None
-    scores: dict[str, int] = {root: 0 for root in latinRoots}
+    scores: dict[str, int] = {root: 0 for root, _canonical in latinRoots}
     for char in nonAsciiChars:
-        matching = [root for root in latinRoots if char in _LATIN_NON_ASCII_EXEMPLARS[root]]
+        matching = [root for root, canonical in latinRoots if char in _LATIN_NON_ASCII_EXEMPLARS[canonical]]
         if len(matching) == 1:
             scores[matching[0]] += _UNIQUE_EXEMPLAR_WEIGHT
         elif len(matching) > 1:
@@ -282,7 +313,7 @@ def language_token_signal(
     candidateRoots: Collection[str],
     is_url_token: Callable[[str], bool] | None = None,
 ) -> tuple[str | None, int]:
-    normalized = normalize_mathematical_alphanumeric(token).strip(_WORD_CONNECTOR_CHARS)
+    normalized = normalize_mathematical_alphanumeric(token).strip(_WORD_CONNECTOR_STRIP_CHARS)
     if not normalized or (is_url_token is not None and is_url_token(normalized)):
         return None, 0
     scriptRoot = language_script_signal(normalized, candidateRoots)
@@ -330,12 +361,15 @@ def is_single_grapheme_token(text: str) -> bool:
     """Return True if text (ignoring outer whitespace) is a single character, base+marks, or single emoji grapheme."""
     if not text:
         return False
+    rawStripped = text.strip()
+    if not rawStripped:
+        return False
     stripped = normalize_mathematical_alphanumeric(text).strip()
     if not stripped:
         return False
-    if len(stripped) == 1:
+    if len(rawStripped) == 1 or len(stripped) == 1:
         return True
-    if _EMOJI_SINGLE_RE.match(stripped):
+    if _EMOJI_SINGLE_RE.fullmatch(stripped):
         return True
     return all(is_combining_mark(ord(ch)) for ch in stripped[1:])
 
@@ -361,13 +395,13 @@ _EMOJI_MODIFIERS = r"[\uFE0E\uFE0F\u20E3\U0001F3FB-\U0001F3FF\U000E0020-\U000E00
 _EMOJI_ZWJ_LINK = rf"(?>\u200D{_EMOJI_BASE}{_EMOJI_MODIFIERS})*+"
 _EMOJI_SINGLE_PATTERN = rf"{_EMOJI_BASE}{_EMOJI_MODIFIERS}{_EMOJI_ZWJ_LINK}"
 _EMOJI_RUN_PATTERN = rf"(?>{_EMOJI_SINGLE_PATTERN})++"
-_EMOJI_SINGLE_RE = re.compile(rf"^{_EMOJI_SINGLE_PATTERN}$", re.UNICODE)
-_EMOJI_TOKEN_RE = re.compile(rf"^{_EMOJI_RUN_PATTERN}$", re.UNICODE)
+_EMOJI_SINGLE_RE = re.compile(rf"\A{_EMOJI_SINGLE_PATTERN}\Z", re.UNICODE)
+_EMOJI_TOKEN_RE = re.compile(rf"\A{_EMOJI_RUN_PATTERN}\Z", re.UNICODE)
 
 
 def is_emoji_token(token: str) -> bool:
     """Return True if token is an intact Unicode emoji or emoji sequence."""
-    return bool(_EMOJI_TOKEN_RE.match(token))
+    return bool(_EMOJI_TOKEN_RE.fullmatch(token))
 
 
 # Unicode Category Sc (currency symbols across BMP and SMP)
@@ -385,28 +419,28 @@ _UNITS_PATTERN = rf"(?-i:(?:{'|'.join(re.escape(u) for u in _INTERNATIONAL_UNITS
 # Time format: standard 24h/12h with optional AM/PM (hh:mm[:ss]), or colloquial hh'h'mm
 _TIME_PATTERN = (
     r"(?:"
-    r"\d{1,2}:\d{2}(?::\d{2})?(?:\s*(?:AM|PM|am|pm))?"
-    r"|\d{1,2}[h:]\d{2}(?:am|pm|sa|ch|a\.m\.|p\.m\.|[hmps])?(?![^\W\d_])"
+    r"\d{1,2}:\d{2}:\d{2}(?:\s*(?:am|pm|a\.m\.|p\.m\.)(?![^\W\d_]))?"
+    r"|\d{1,2}[h:]\d{2}(?:\s*(?:am|pm|a\.m\.|p\.m\.)|(?:sa|ch|[hmps]))(?![^\W\d_])"
+    r"|\d{1,2}[h:]\d{2}(?![^\W\d_])"
+    r"|\d{1,2}:\d{2}"
     r")"
 )
 _NUM_CORE = r"(?:\d++(?:[.,/:\u066b\u066c\u060d]\d++)*+)"
 _NUM_RANGE_OP = r"(?:[–—~×xX*+±\-]|/(?!\d)|(?<!\d)/)"
 
-_NUMBER_CHUNK_PATTERN = (
+_NUMBER_ATOM_PATTERN = (
     rf"(?:(?:[±~]\s*|[+\-])?(?:(?:{_CURRENCY_PATTERN}|{_PERCENT_PATTERN})\s*)?"
     rf"(?:{_TIME_PATTERN}|{_NUM_CORE})"
-    rf"(?:\s*(?:{_CURRENCY_PATTERN}|{_PERCENT_PATTERN}|{_UNITS_PATTERN}))?"
-    rf"(?:\s*{_NUM_RANGE_OP}\s*"
-    rf"(?:(?:[±~]\s*|[+\-])?(?:(?:{_CURRENCY_PATTERN}|{_PERCENT_PATTERN})\s*)?(?:{_TIME_PATTERN}|{_NUM_CORE})(?:\s*(?:{_CURRENCY_PATTERN}|{_PERCENT_PATTERN}|{_UNITS_PATTERN}))?)"
-    rf")*)"
+    rf"(?:\s*(?:{_CURRENCY_PATTERN}|{_PERCENT_PATTERN}|{_UNITS_PATTERN}))?)"
 )
+_NUMBER_CHUNK_PATTERN = rf"(?:{_NUMBER_ATOM_PATTERN}(?:\s*{_NUM_RANGE_OP}\s*{_NUMBER_ATOM_PATTERN})*)"
 
-_NUMBER_TOKEN_RE = re.compile(rf"^{_NUMBER_CHUNK_PATTERN}$", re.IGNORECASE | re.UNICODE)
+_NUMBER_TOKEN_RE = re.compile(rf"\A{_NUMBER_CHUNK_PATTERN}\Z", re.IGNORECASE | re.UNICODE)
 
 
 def is_number_token(token: str) -> bool:
     """Check if token is numeric (digits, decimals, percentages, currency, units, time, ranges)."""
-    return bool(_NUMBER_TOKEN_RE.match(token))
+    return bool(_NUMBER_TOKEN_RE.fullmatch(token))
 
 
 def is_symbol_or_emoji_token(token: str) -> bool:
@@ -454,12 +488,8 @@ def get_character_script(cp: int) -> str | None:
     """Resolve character codepoint to its script name."""
     if 0x41 <= cp <= 0x5A or 0x61 <= cp <= 0x7A:
         return "Latin"
-    idx = bisect.bisect_right(_FLATTENED_SCRIPT_STARTS, cp) - 1
-    if idx >= 0:
-        start, end, script = _FLATTENED_SCRIPT_RANGES[idx]
-        if start <= cp <= end:
-            return script
-    return None
+    entry = lookup_codepoint_range(cp, _FLATTENED_SCRIPT_STARTS, _FLATTENED_SCRIPT_RANGES)
+    return entry[2] if entry is not None else None
 
 
 _DOMAIN_LABEL = r"[A-Za-z0-9_](?:[A-Za-z0-9_\-]*[A-Za-z0-9_])?"
@@ -471,12 +501,12 @@ _URL_EMAIL_DOMAIN_PATTERN = (
     rf"|(?-i:(?=[A-Z0-9_.]*[A-Z])[A-Z0-9_]{{2,}}(?:\.[A-Z0-9_]{{2,}})+|{_DOMAIN_LABEL}(?:\.{_LOWER_DOMAIN_LABEL})*\.[a-z]{{2,}})"
     r")"
 )
-_URL_EMAIL_DOMAIN_RE = re.compile(rf"^(?:{_URL_EMAIL_DOMAIN_PATTERN})$", re.IGNORECASE | re.UNICODE)
+_URL_EMAIL_DOMAIN_RE = re.compile(rf"\A(?:{_URL_EMAIL_DOMAIN_PATTERN})\Z", re.IGNORECASE | re.UNICODE)
 
 
 def is_url_or_email_token(token: str) -> bool:
     """Return True if token is a URL, email address, or dotted domain/filename."""
-    return bool(_URL_EMAIL_DOMAIN_RE.match(token))
+    return bool(_URL_EMAIL_DOMAIN_RE.fullmatch(token))
 
 
 _MIXED_TOKENIZER_RE = re.compile(
@@ -489,6 +519,10 @@ _MIXED_TOKENIZER_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
+_CLAUSE_BREAK_NEWLINES: frozenset[str] = frozenset({"\n", "\r", "\u0085", "\u2028", "\u2029"})
+
+# Non-wrapper punctuation beyond SENTENCE_TERMINAL_CODEPOINTS that starts a new clause.
+# Bracket and quote delimiters (Ps/Pe/Pi/Pf) are matched via is_wrapper_punctuation_codepoint.
 _CLAUSE_BREAK_PUNCTUATION: frozenset[str] = frozenset(
     {
         *(chr(cp) for cp in SENTENCE_TERMINAL_CODEPOINTS),
@@ -503,77 +537,17 @@ _CLAUSE_BREAK_PUNCTUATION: frozenset[str] = frozenset(
         "|",
         "¦",
         "‖",
-        ".",
-        "!",
-        "?",
         "…",
         "⋯",
-        "(",
-        ")",
-        "[",
-        "]",
-        "{",
-        "}",
         '"',
         "'",
-        "“",
-        "”",
-        "‘",
-        "’",
-        "‚",
-        "‛",
-        "„",
-        "‟",
-        "«",
-        "»",
-        "‹",
-        "›",
-        "⹂",
         "、",
-        "。",
         "，",
         "；",
         "：",
-        "！",
-        "？",
-        "．",
-        "「",
-        "」",
-        "『",
-        "』",
-        "（",
-        "）",
-        "［",
-        "］",
-        "｛",
-        "｝",
-        "｟",
-        "｠",
-        "⦅",
-        "⦆",
-        "〈",
-        "〉",
-        "《",
-        "》",
-        "〔",
-        "〕",
-        "〖",
-        "〗",
-        "〘",
-        "〙",
-        "〚",
-        "〛",
-        "【",
-        "】",
-        "〝",
-        "〞",
-        "〟",
         "〜",
         "〰",
         "・",
-        "｡",
-        "｢",
-        "｣",
         "､",
         "\u00b7",
         "\u037e",
@@ -582,14 +556,10 @@ _CLAUSE_BREAK_PUNCTUATION: frozenset[str] = frozenset(
         "\u055c",
         "\u055d",
         "\u055e",
-        "\u0589",
         "\u05c0",
         "\u05c3",
         "\u060c",
         "\u061b",
-        "\u061e",
-        "\u061f",
-        "\u06d4",
         "\u0df4",
         "\u0e5a",
         "\u0e5b",
@@ -598,30 +568,17 @@ _CLAUSE_BREAK_PUNCTUATION: frozenset[str] = frozenset(
         "\u0f0d",
         "\u0f0e",
         "\u104a",
-        "\u104b",
         "\u10fb",
         "\u1361",
-        "\u1362",
         "\u1363",
         "\u1364",
         "\u1365",
         "\u1366",
-        "\u1367",
-        "\u1368",
-        "\u17d4",
-        "\u17d5",
         "\u17d6",
         "\u17d8",
         "\ua9c7",
         "\ua9c8",
         "\ua9c9",
-        "\ufd3e",
-        "\ufd3f",
-        "\n",
-        "\r",
-        "\u0085",
-        "\u2028",
-        "\u2029",
     }
 )
 
@@ -629,6 +586,8 @@ _CLAUSE_BREAK_PUNCTUATION: frozenset[str] = frozenset(
 def _is_clause_break_chunk(chunks: list[tuple[str, str]], idx: int) -> bool:
     """Return True when chunk at `idx` acts as a clause separator."""
     chunkVal, chunkCat = chunks[idx]
+    if chunkCat == "WHITE" and any(ch in _CLAUSE_BREAK_NEWLINES for ch in chunkVal):
+        return True
     if chunkCat in ("PUNCT", "SYM") and any(
         ch in _CLAUSE_BREAK_PUNCTUATION or is_wrapper_punctuation_codepoint(ord(ch)) for ch in chunkVal
     ):
@@ -681,8 +640,49 @@ def _candidate_roots_map(candidateLanguages: list[str]) -> dict[str, str]:
     """Map language roots to their highest-priority candidate locale."""
     roots: dict[str, str] = {}
     for cand in candidateLanguages:
-        roots.setdefault(cand.replace("_", "-").split("-", 1)[0].lower(), cand)
+        roots.setdefault(language_root(cand), cand)
     return roots
+
+
+def _split_word_token_by_script(tok: str) -> list[tuple[str, str, bool]]:
+    """Split a word token at script transitions while keeping combining marks/connectors attached.
+
+    Returns ``(subtoken, category, hasKana)`` triples whose concatenated text equals ``tok``.
+    """
+    letterScripts: list[str | None] = []
+    hasNumber = False
+    for ch in tok:
+        cp = ord(ch)
+        if is_letter_codepoint(cp):
+            letterScripts.append(get_character_script(cp) or "Latin")
+        elif is_number_codepoint(cp):
+            hasNumber = True
+    if not letterScripts:
+        if hasNumber:
+            return [(tok, "NUM", False)]
+        return [(tok, "SCRIPT_Latin", False)]
+    uniqueScripts = set(letterScripts)
+    if len(uniqueScripts) == 1:
+        onlyScript = next(iter(uniqueScripts)) or "Latin"
+        return [(tok, f"SCRIPT_{onlyScript}", onlyScript in ("Hiragana", "Katakana"))]
+
+    runs: list[tuple[str, str, bool]] = []
+    runStart = 0
+    currentScript: str | None = None
+    for idx, ch in enumerate(tok):
+        cp = ord(ch)
+        if not is_letter_codepoint(cp):
+            continue
+        chScript = get_character_script(cp) or "Latin"
+        if currentScript is None:
+            currentScript = chScript
+        elif chScript != currentScript:
+            runs.append((tok[runStart:idx], f"SCRIPT_{currentScript}", currentScript in ("Hiragana", "Katakana")))
+            runStart = idx
+            currentScript = chScript
+    finalScript = currentScript or "Latin"
+    runs.append((tok[runStart:], f"SCRIPT_{finalScript}", finalScript in ("Hiragana", "Katakana")))
+    return runs
 
 
 def segment_mixed_text(
@@ -718,7 +718,7 @@ def segment_mixed_text(
         return [(normalizedText, lang)]
 
     candidateRoots = _candidate_roots_map(candidateLanguages)
-    prefRoot = preferredLanguage.replace("_", "-").split("-", 1)[0].lower()
+    prefRoot = language_root(preferredLanguage)
 
     # Single character reading (when not part of a multi-item utterance with an active defaultLanguage):
     # route directly to preferred language (or candidate language if matching a non-Latin script
@@ -737,26 +737,28 @@ def segment_mixed_text(
     rawTokens = _MIXED_TOKENIZER_RE.findall(normalizedText)
 
     for tok in rawTokens:
-        tokenHasKana = False
         if tok.isspace():
             chunks.append((tok, "WHITE"))
+            chunkHasKana.append(False)
         elif is_emoji_token(tok):
             chunks.append((tok, "SYM"))
+            chunkHasKana.append(False)
         elif is_number_token(tok):
             chunks.append((tok, "NUM"))
+            chunkHasKana.append(False)
         elif is_url_or_email_token(tok):
             chunks.append((tok, "URL"))
+            chunkHasKana.append(False)
         elif is_symbol_or_emoji_token(tok):
             if all(is_punctuation_codepoint(ord(c)) or c.isspace() for c in tok):
                 chunks.append((tok, "PUNCT"))
             else:
                 chunks.append((tok, "SYM"))
+            chunkHasKana.append(False)
         else:
-            scripts = [get_character_script(ord(c)) for c in tok if is_letter_codepoint(ord(c))]
-            tokenHasKana = any(s in ("Hiragana", "Katakana") for s in scripts)
-            dominantScript = next((s for s in scripts if s is not None), "Latin")
-            chunks.append((tok, f"SCRIPT_{dominantScript}"))
-        chunkHasKana.append(tokenHasKana)
+            for subTok, subCat, subHasKana in _split_word_token_by_script(tok):
+                chunks.append((subTok, subCat))
+                chunkHasKana.append(subHasKana)
 
     clauseHasKana = [False] * len(chunks)
     clauseStartIdx = 0
@@ -775,9 +777,7 @@ def segment_mixed_text(
                 clauseHasKana[k] = True
         clauseStartIdx = clauseEndIdx
 
-    hanCandidates = [
-        cand for cand in candidateLanguages if cand.replace("_", "-").split("-", 1)[0].lower() in _HAN_CANDIDATE_ROOTS
-    ]
+    hanCandidates = [cand for cand in candidateLanguages if language_root(cand) in _HAN_CANDIDATE_ROOTS]
 
     # Initial language classification for chunks:
     # Whitespace, punctuation, symbols/emojis, URLs/emails, and numbers/units/currencies/times
@@ -812,14 +812,13 @@ def segment_mixed_text(
             elif scriptName in _SCRIPT_TO_CANDIDATE_ROOTS:
                 # Check preferredLanguage first if it supports this script
                 validRoots = _SCRIPT_TO_CANDIDATE_ROOTS[scriptName]
-                canonicalPrefRoot = _ROOT_CANONICAL_ALIASES.get(prefRoot, prefRoot)
+                canonicalPrefRoot = canonical_language_root(prefRoot)
                 if canonicalPrefRoot in validRoots:
                     classifiedChunks.append((val, preferredLanguage))
                 else:
                     # Match according to user-configured priority in candidateLanguages
                     for cand in candidateLanguages:
-                        candRoot = cand.replace("_", "-").split("-", 1)[0].lower()
-                        canonicalCandRoot = _ROOT_CANONICAL_ALIASES.get(candRoot, candRoot)
+                        canonicalCandRoot = canonical_language_root(cand)
                         if canonicalCandRoot in validRoots:
                             classifiedChunks.append((val, cand))
                             break
@@ -830,10 +829,10 @@ def segment_mixed_text(
                 classifiedChunks.append((val, "LATIN"))
 
     # Resolve LATIN chunks
-    latinCandidateRoots = [r for r in candidateRoots if "Latin" in SUPPORTED_LANGUAGE_SCRIPTS.get(r, ())]
-    latinCandidates = [
-        cand for cand in candidateLanguages if cand.replace("_", "-").split("-", 1)[0].lower() in latinCandidateRoots
+    latinCandidateRoots = [
+        r for r in candidateRoots if "Latin" in SUPPORTED_LANGUAGE_SCRIPTS.get(canonical_language_root(r), ())
     ]
+    latinCandidates = [cand for cand in candidateLanguages if language_root(cand) in latinCandidateRoots]
     preferredLatin = (
         preferredLanguage
         if preferredLanguage in latinCandidates
@@ -842,7 +841,10 @@ def segment_mixed_text(
         else None
     )
     if len(latinCandidates) <= 1:
-        singleLatin = latinCandidates[0] if latinCandidates else preferredLanguage
+        if spellingOnlyUtterance and preferredLanguage:
+            singleLatin = preferredLanguage
+        else:
+            singleLatin = latinCandidates[0] if latinCandidates else preferredLanguage
         classifiedChunks = [(v, singleLatin if lang == "LATIN" else lang) for v, lang in classifiedChunks]
     else:
         nonEnViLatin = any(r not in ("en", "vi") for r in latinCandidateRoots) or len(latinCandidates) > len(

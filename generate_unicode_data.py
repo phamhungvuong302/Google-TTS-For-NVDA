@@ -24,9 +24,7 @@ from generate_voices_json import (
 )
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_ENGINE_ROOT = ROOT / "googleTtsForNvda" / "synthDrivers" / "googleTtsForNvda" / "WasmTtsEngine"
 DEFAULT_OUTPUT = ROOT / "googleTtsForNvda" / "synthDrivers" / "googleTtsForNvda" / "unicode_data.py"
-DEFAULT_CATALOG_MODULE = ROOT / "googleTtsForNvda" / "synthDrivers" / "googleTtsForNvda" / "catalog.py"
 
 _CLDR_COMPOSITE_SCRIPTS = {
     "Hanb": ("Han", "Bopomofo"),
@@ -169,7 +167,8 @@ def _supported_locales(voicesJsonPath: Path) -> set[str]:
     for package in packages:
         parts = str(package.get("id", "")).split("-")
         if len(parts) >= 2 and re.fullmatch(r"[a-z]{2,3}", parts[0]) and re.fullmatch(r"[a-z]{2}|\d{3}", parts[1]):
-            locales.add(f"{parts[0]}_{parts[1]}")
+            region = parts[1].upper() if parts[1].isalpha() else parts[1]
+            locales.add(f"{parts[0].lower()}_{region}")
     return locales
 
 
@@ -208,9 +207,16 @@ def _supported_language_scripts(
     secondaryMap = secondaryLanguageScripts or {}
     byLanguage: dict[str, set[str]] = defaultdict(set)
     for locale in locales:
-        language = locale.split("_", 1)[0]
+        parts = locale.split("_", 1)
+        language = parts[0].lower()
+        normalizedLocale = f"{language}_{parts[1].upper()}" if len(parts) == 2 and parts[1].isalpha() else locale
         fallbackLanguage = aliases.get(language, language)
-        scriptCode = likelyScripts.get(locale) or likelyScripts.get(language) or likelyScripts.get(fallbackLanguage)
+        scriptCode = (
+            likelyScripts.get(normalizedLocale)
+            or likelyScripts.get(locale)
+            or likelyScripts.get(language)
+            or likelyScripts.get(fallbackLanguage)
+        )
         if scriptCode is None:
             raise ValueError(f"CLDR has no likely script for supported locale {locale}")
         byLanguage[language].update(_expand_cldr_script_codes(scriptCode, scriptAliases))
@@ -233,11 +239,15 @@ def _merge_ranges(ranges: Iterable[tuple[int, int]]) -> tuple[tuple[int, int], .
     return tuple((start, end) for start, end in merged)
 
 
-def _format_ranges(ranges: Iterable[tuple[int, int]], indent: str = "\t\t") -> str:
+def _py_double_quoted(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _format_ranges(ranges: Iterable[tuple[int, int]], indent: str = "        ") -> str:
     return "\n".join(f"{indent}(0x{start:04X}, 0x{end:04X})," for start, end in ranges)
 
 
-def _format_codepoints(codepoints: Iterable[int], indent: str = "\t") -> str:
+def _format_codepoints(codepoints: Iterable[int], indent: str = "    ") -> str:
     values = [f"0x{codepoint:04X}" for codepoint in sorted(codepoints)]
     lines = []
     for index in range(0, len(values), 10):
@@ -245,25 +255,25 @@ def _format_codepoints(codepoints: Iterable[int], indent: str = "\t") -> str:
     return "\n".join(lines)
 
 
-def _format_normalization_table(table: dict[int, str], indent: str = "\t") -> str:
+def _format_normalization_table(table: dict[int, str], indent: str = "    ") -> str:
     lines = []
     for codepoint in sorted(table):
-        lines.append(f"{indent}0x{codepoint:04X}: {repr(table[codepoint])},")
+        lines.append(f"{indent}0x{codepoint:04X}: {_py_double_quoted(table[codepoint])},")
     return "\n".join(lines)
 
 
-def _format_string_tuple(values: Iterable[str], indent: str = "\t") -> str:
-    items = [repr(value) for value in sorted(set(values))]
+def _format_string_tuple(values: Iterable[str], indent: str = "    ") -> str:
+    items = [_py_double_quoted(value) for value in sorted(set(values))]
     lines = []
     for index in range(0, len(items), 10):
         lines.append(indent + ", ".join(items[index : index + 10]) + ",")
     return "\n".join(lines)
 
 
-def _format_string_dict(mapping: dict[str, str], indent: str = "\t") -> str:
+def _format_string_dict(mapping: dict[str, str], indent: str = "    ") -> str:
     lines = []
     for key in sorted(mapping):
-        lines.append(f"{indent}{repr(key)}: {repr(mapping[key])},")
+        lines.append(f"{indent}{_py_double_quoted(key)}: {_py_double_quoted(mapping[key])},")
     return "\n".join(lines)
 
 
@@ -396,6 +406,38 @@ def _extract_cldr_active_currencies(cldrCommonDir: Path | None) -> tuple[str, ..
     return tuple(sorted(codes))
 
 
+def _read_cldr_escape(text: str, index: int) -> tuple[str | None, int]:
+    """Decode one backslash escape starting at text[index] == '\\\\'."""
+    length = len(text)
+    if index + 1 >= length:
+        return None, length
+    kind = text[index + 1]
+    hexLen = 4 if kind == "u" else 8 if kind == "U" else 0
+    if hexLen and index + 2 + hexLen <= length:
+        try:
+            cp = int(text[index + 2 : index + 2 + hexLen], 16)
+        except ValueError:
+            cp = -1
+        if 0 <= cp <= 0x10FFFF:
+            return chr(cp), index + 2 + hexLen
+    return kind, index + 2
+
+
+def _decode_cldr_escapes(text: str) -> str:
+    chars: list[str] = []
+    idx = 0
+    length = len(text)
+    while idx < length:
+        if text[idx] == "\\":
+            decoded, idx = _read_cldr_escape(text, idx)
+            if decoded is not None:
+                chars.append(decoded)
+        else:
+            chars.append(text[idx])
+            idx += 1
+    return "".join(chars)
+
+
 def _parse_cldr_exemplar_set(rawText: str, letterCodepoints: set[int] | None = None) -> set[str]:
     text = rawText.strip()
     if text.startswith("[") and text.endswith("]"):
@@ -428,7 +470,7 @@ def _parse_cldr_exemplar_set(rawText: str, letterCodepoints: set[int] | None = N
             endIndex = text.find("}", index + 1)
             if endIndex == -1:
                 break
-            seq = unicodedata.normalize("NFC", text[index + 1 : endIndex])
+            seq = unicodedata.normalize("NFC", _decode_cldr_escapes(text[index + 1 : endIndex]))
             for ch in seq:
                 _add_char(ch)
             index = endIndex + 1
@@ -438,37 +480,10 @@ def _parse_cldr_exemplar_set(rawText: str, letterCodepoints: set[int] | None = N
             index += 1
             continue
         if text[index] == "\\":
-            if index + 5 < length and text[index + 1] == "u":
-                hexDigits = text[index + 2 : index + 6]
-                try:
-                    cp = int(hexDigits, 16)
-                    if 0 <= cp <= 0x10FFFF:
-                        ch = chr(cp)
-                        index += 6
-                    else:
-                        ch = text[index + 1]
-                        index += 2
-                except ValueError:
-                    ch = text[index + 1]
-                    index += 2
-            elif index + 9 < length and text[index + 1] == "U":
-                hexDigits = text[index + 2 : index + 10]
-                try:
-                    cp = int(hexDigits, 16)
-                    if 0 <= cp <= 0x10FFFF:
-                        ch = chr(cp)
-                        index += 10
-                    else:
-                        ch = text[index + 1]
-                        index += 2
-                except ValueError:
-                    ch = text[index + 1]
-                    index += 2
-            elif index + 1 < length:
-                ch = text[index + 1]
-                index += 2
-            else:
+            decoded, index = _read_cldr_escape(text, index)
+            if decoded is None:
                 break
+            ch = decoded
         else:
             ch = text[index]
             index += 1
@@ -640,9 +655,6 @@ def _extract_cldr_unit_symbols(cldrCommonDir: Path | None) -> tuple[str, ...]:
             if len(baseSym) <= 3 and (baseSym.isalpha() or baseSym in ("Ω", "Ω")):
                 for prefix in commonSiPrefixes:
                     allSymbols.add(f"{prefix}{baseSym}")
-                    if baseSym in ("Ω", "Ω"):
-                        allSymbols.add(f"{prefix}Ω")
-                        allSymbols.add(f"{prefix}Ω")
 
     digitalSiPrefixes = {
         prefix for key, prefix in siPrefixes.items() if key in {"10p3", "10p6", "10p9", "10p12", "10p15"}
@@ -853,31 +865,31 @@ def _render_module(
         "SUPPORTED_LANGUAGE_SCRIPTS = {",
     ]
     for language, scripts in languageScripts.items():
-        tupleText = ", ".join(repr(script) for script in scripts)
+        tupleText = ", ".join(_py_double_quoted(script) for script in scripts)
         if len(scripts) == 1:
             tupleText += ","
-        lines.append(f'\t"{language}": ({tupleText}),')
+        lines.append(f'    "{language}": ({tupleText}),')
     lines.extend(("}", "", "SCRIPT_RANGES = {"))
     for script, ranges in scriptRanges.items():
-        lines.append(f'\t"{script}": (')
+        lines.append(f'    "{script}": (')
         lines.append(_format_ranges(ranges))
-        lines.append("\t),")
+        lines.append("    ),")
     lines.extend(
         (
             "}",
             "",
             "LANGUAGE_SCRIPT_RANGES = {",
-            "\tlanguage: tuple(span for script in scripts for span in SCRIPT_RANGES[script])",
-            "\tfor language, scripts in SUPPORTED_LANGUAGE_SCRIPTS.items()",
+            "    language: tuple(span for script in scripts for span in SCRIPT_RANGES[script])",
+            "    for language, scripts in SUPPORTED_LANGUAGE_SCRIPTS.items()",
             "}",
         )
     )
     if noSpaceScriptRanges is not None:
         lines.extend(("", "NO_SPACE_SCRIPT_RANGES: dict[str, tuple[tuple[int, int], ...]] = {"))
         for script, ranges in noSpaceScriptRanges.items():
-            lines.append(f'\t"{script}": (')
+            lines.append(f'    "{script}": (')
             lines.append(_format_ranges(ranges))
-            lines.append("\t),")
+            lines.append("    ),")
         lines.append("}")
     lines.extend(
         (
@@ -892,7 +904,7 @@ def _render_module(
             (
                 "",
                 "COMBINING_MARK_RANGES: tuple[tuple[int, int], ...] = (",
-                _format_ranges(combiningMarkRanges, indent="\t"),
+                _format_ranges(combiningMarkRanges, indent="    "),
                 ")",
             )
         )
@@ -901,7 +913,7 @@ def _render_module(
             (
                 "",
                 "GRAPHEME_EXTEND_EXTRA_RANGES: tuple[tuple[int, int], ...] = (",
-                _format_ranges(graphemeExtendExtraRanges, indent="\t"),
+                _format_ranges(graphemeExtendExtraRanges, indent="    "),
                 ")",
             )
         )
@@ -910,7 +922,7 @@ def _render_module(
             (
                 "",
                 "REGIONAL_INDICATOR_RANGES: tuple[tuple[int, int], ...] = (",
-                _format_ranges(regionalIndicatorRanges, indent="\t"),
+                _format_ranges(regionalIndicatorRanges, indent="    "),
                 ")",
             )
         )
@@ -929,7 +941,7 @@ def _render_module(
                 (
                     "",
                     f"{constName}: tuple[tuple[int, int], ...] = (",
-                    _format_ranges(ucdCategoryRanges[key], indent="\t"),
+                    _format_ranges(ucdCategoryRanges[key], indent="    "),
                     ")",
                 )
             )
@@ -938,7 +950,7 @@ def _render_module(
             (
                 "",
                 "CURRENCY_SYMBOL_RANGES: tuple[tuple[int, int], ...] = (",
-                _format_ranges(currencySymbolRanges, indent="\t"),
+                _format_ranges(currencySymbolRanges, indent="    "),
                 ")",
             )
         )
@@ -947,7 +959,7 @@ def _render_module(
             (
                 "",
                 "EMOJI_PICTOGRAPHIC_RANGES: tuple[tuple[int, int], ...] = (",
-                _format_ranges(emojiPictographicRanges, indent="\t"),
+                _format_ranges(emojiPictographicRanges, indent="    "),
                 ")",
             )
         )
@@ -956,7 +968,7 @@ def _render_module(
             (
                 "",
                 "CLDR_ACTIVE_CURRENCIES: tuple[str, ...] = (",
-                _format_string_tuple(cldrActiveCurrencies, indent="\t"),
+                _format_string_tuple(cldrActiveCurrencies, indent="    "),
                 ")",
             )
         )
@@ -965,7 +977,7 @@ def _render_module(
             (
                 "",
                 "CLDR_UNIT_SYMBOLS: tuple[str, ...] = (",
-                _format_string_tuple(cldrUnitSymbols, indent="\t"),
+                _format_string_tuple(cldrUnitSymbols, indent="    "),
                 ")",
             )
         )
@@ -974,7 +986,7 @@ def _render_module(
             (
                 "",
                 "LATIN_LANGUAGE_EXEMPLARS: dict[str, str] = {",
-                _format_string_dict(latinLanguageExemplars, indent="\t"),
+                _format_string_dict(latinLanguageExemplars, indent="    "),
                 "}",
             )
         )
@@ -1014,13 +1026,10 @@ def main() -> int:
     propListPath = args.ucd_dir / "PropList.txt"
     ucdVersion = _ucd_version(scriptsPath)
     scriptAliases = _script_aliases(aliasesPath)
-    try:
-        voicesJsonPath = select_engine_voices_json(
-            explicitVoicesJson=args.voices_json,
-            configuredVersion=_configured_engine_version(),
-        )
-    except FileNotFoundError:
-        return 1
+    voicesJsonPath = select_engine_voices_json(
+        explicitVoicesJson=args.voices_json,
+        configuredVersion=_configured_engine_version(),
+    )
     cldrCommonDir = args.cldr_common_dir
     if cldrCommonDir is None and args.likely_subtags.parent.name == "supplemental":
         cldrCommonDir = args.likely_subtags.parent.parent

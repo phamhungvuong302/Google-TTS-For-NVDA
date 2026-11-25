@@ -15,6 +15,7 @@ ADDON_ID = "googleTtsForNvda"
 BUILD_INFO_FILE_NAME = "buildInfo.json"
 DEFAULT_CHANNEL = "stable"
 DEFAULT_OUTPUT = "stable.json"
+MAX_UPDATE_PACKAGE_BYTES = 512 * 1024 * 1024
 DEFAULT_URL_TEMPLATE = (
     "https://github.com/phamhungvuong302/Google-TTS-For-NVDA/"
     "releases/download/v{version}/googleTtsForNvda-{version}.nvda-addon"
@@ -62,6 +63,24 @@ def _unquote(value: str) -> str:
     return value
 
 
+def _find_unescaped_delimiter(text: str, delimiter: str) -> int:
+    idx = 0
+    length = len(text)
+    while idx < length:
+        if text[idx] == "\\":
+            idx += 2
+            continue
+        if text.startswith(delimiter, idx):
+            return idx
+        idx += 1
+    return -1
+
+
+def _unescape_multiline_value(value: str) -> str:
+    escapes = {'"': '"', "'": "'", "\\": "\\"}
+    return re.sub(r"\\(.)", lambda m: escapes.get(m.group(1), m.group(0)), value)
+
+
 def _parse_manifest(text: str) -> dict[str, str]:
     values: dict[str, str] = {}
     lines = text.splitlines()
@@ -81,7 +100,7 @@ def _parse_manifest(text: str) -> dict[str, str]:
             delimiter = rawValue[:3]
             valuePart = rawValue[3:]
             parts: list[str] = []
-            end = valuePart.find(delimiter)
+            end = _find_unescaped_delimiter(valuePart, delimiter)
             if end >= 0:
                 parts.append(valuePart[:end])
             else:
@@ -89,14 +108,14 @@ def _parse_manifest(text: str) -> dict[str, str]:
                 while index < len(lines):
                     nextLine = lines[index]
                     index += 1
-                    end = nextLine.find(delimiter)
+                    end = _find_unescaped_delimiter(nextLine, delimiter)
                     if end >= 0:
                         parts.append(nextLine[:end])
                         break
                     parts.append(nextLine)
                 else:
                     raise ManifestError(f"Unterminated triple-quoted value for {key}.")
-            values[key] = "\n".join(parts).strip()
+            values[key] = _unescape_multiline_value("\n".join(parts)).strip()
             continue
         values[key] = _unquote(rawValue)
     return values
@@ -132,19 +151,15 @@ def _json_positive_int(data: dict[str, object], key: str) -> int:
     return value
 
 
-def _read_addon_build_info(addonPath: Path, version: str) -> dict[str, object]:
+def _read_addon_build_info_from_archive(archive: zipfile.ZipFile, version: str) -> dict[str, object]:
     try:
-        with zipfile.ZipFile(addonPath, "r") as archive:
-            try:
-                rawData = archive.read(BUILD_INFO_FILE_NAME)
-            except KeyError:
-                return {
-                    "baseVersion": version,
-                    "displayVersion": version,
-                    "updateBuild": 0,
-                }
-    except (OSError, zipfile.BadZipFile) as exc:
-        raise ManifestError(f"Could not read {addonPath} as an NVDA add-on package: {exc}") from exc
+        rawData = archive.read(BUILD_INFO_FILE_NAME)
+    except KeyError:
+        return {
+            "baseVersion": version,
+            "displayVersion": version,
+            "updateBuild": 0,
+        }
     try:
         data = json.loads(rawData.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -165,28 +180,40 @@ def _read_addon_build_info(addonPath: Path, version: str) -> dict[str, object]:
     }
 
 
-def _read_release_notes_by_locale(addonPath: Path) -> dict[str, str]:
-    notesByLocale: dict[str, str] = {}
+def _read_addon_build_info(addonPath: Path, version: str) -> dict[str, object]:
     try:
         with zipfile.ZipFile(addonPath, "r") as archive:
-            for memberName in sorted(archive.namelist()):
-                normalizedName = memberName.replace("\\", "/")
-                match = TRANSLATED_MANIFEST_RE.match(normalizedName)
-                if match is None:
-                    continue
-                language = match.group(1).strip()
-                if not language:
-                    continue
-                try:
-                    manifest = _read_manifest_from_archive(archive, memberName)
-                except (KeyError, UnicodeDecodeError, ManifestError) as exc:
-                    raise ManifestError(f"Could not read translated manifest {normalizedName}: {exc}") from exc
-                changelog = str(manifest.get("changelog") or "").strip()
-                if changelog:
-                    notesByLocale[language] = changelog
+            return _read_addon_build_info_from_archive(archive, version)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise ManifestError(f"Could not read {addonPath} as an NVDA add-on package: {exc}") from exc
+
+
+def _read_release_notes_by_locale_from_archive(archive: zipfile.ZipFile) -> dict[str, str]:
+    notesByLocale: dict[str, str] = {}
+    for memberName in sorted(archive.namelist()):
+        normalizedName = memberName.replace("\\", "/")
+        match = TRANSLATED_MANIFEST_RE.match(normalizedName)
+        if match is None:
+            continue
+        language = match.group(1).strip()
+        if not language:
+            continue
+        try:
+            manifest = _read_manifest_from_archive(archive, memberName)
+        except (KeyError, UnicodeDecodeError, ManifestError) as exc:
+            raise ManifestError(f"Could not read translated manifest {normalizedName}: {exc}") from exc
+        changelog = str(manifest.get("changelog") or "").strip()
+        if changelog:
+            notesByLocale[language] = changelog
+    return notesByLocale
+
+
+def _read_release_notes_by_locale(addonPath: Path) -> dict[str, str]:
+    try:
+        with zipfile.ZipFile(addonPath, "r") as archive:
+            return _read_release_notes_by_locale_from_archive(archive)
     except (OSError, zipfile.BadZipFile) as exc:
         raise ManifestError(f"Could not read translated manifests from {addonPath}: {exc}") from exc
-    return notesByLocale
 
 
 def _sha256(path: Path) -> str:
@@ -209,6 +236,8 @@ def _version_sort_key(
             mainPart = match.group(1)
             prePart = match.group(2).strip("._ ")
     rawNumericParts = tuple(int(part) for part in re.findall(r"\d+", mainPart))
+    if not rawNumericParts:
+        raise ManifestError(f"Version has no numeric parts: {version}")
     normalizedList = list(rawNumericParts)
     while len(normalizedList) > 1 and normalizedList[-1] == 0:
         normalizedList.pop()
@@ -243,6 +272,7 @@ def _find_addon_package(searchDir: Path, allowNameMismatch: bool = False) -> Pat
     candidates: list[
         tuple[
             tuple[tuple[int, ...], int, tuple[tuple[int, int | str], ...], tuple[int, ...]],
+            int,
             float,
             Path,
         ]
@@ -250,12 +280,15 @@ def _find_addon_package(searchDir: Path, allowNameMismatch: bool = False) -> Pat
     mismatchedNames: list[str] = []
     for packagePath in _iter_addon_packages(searchDir):
         try:
-            manifest = _read_addon_manifest(packagePath)
-            addonId = _require_manifest_value(manifest, "name")
-            version = _require_manifest_value(manifest, "version")
-        except ManifestError:
-            continue
-        if addonId != ADDON_ID or not VERSION_RE.match(version):
+            with zipfile.ZipFile(packagePath, "r") as archive:
+                manifest = _read_manifest_from_archive(archive, "manifest.ini")
+                addonId = _require_manifest_value(manifest, "name")
+                version = _require_manifest_value(manifest, "version")
+                if addonId != ADDON_ID or not VERSION_RE.match(version):
+                    continue
+                versionKey = _version_sort_key(version)
+                buildInfo = _read_addon_build_info_from_archive(archive, version)
+        except (ManifestError, KeyError, OSError, zipfile.BadZipFile, UnicodeDecodeError):
             continue
         expectedFileName = f"{ADDON_ID}-{version}.nvda-addon"
         if packagePath.name != expectedFileName and not allowNameMismatch:
@@ -265,14 +298,15 @@ def _find_addon_package(searchDir: Path, allowNameMismatch: bool = False) -> Pat
             modifiedTime = packagePath.stat().st_mtime
         except OSError:
             modifiedTime = 0
-        candidates.append((_version_sort_key(version), modifiedTime, packagePath))
+        updateBuild = int(buildInfo["updateBuild"])  # type: ignore[call-overload]
+        candidates.append((versionKey, updateBuild, modifiedTime, packagePath))
     if not candidates:
         detail = ""
         if mismatchedNames:
             detail = " Matching packages with unexpected names: " + "; ".join(mismatchedNames)
         raise ManifestError(f"No valid {ADDON_ID} .nvda-addon package was found under {searchDir}.{detail}")
-    candidates.sort(key=lambda item: (item[0], item[1], str(item[2])))
-    return candidates[-1][2]
+    candidates.sort(key=lambda item: (item[0], item[1], item[2], str(item[3])))
+    return candidates[-1][3]
 
 
 def _require_manifest_value(manifest: dict[str, str], key: str) -> str:
@@ -291,14 +325,25 @@ def build_update_manifest(
     addonPath = addonPath.resolve()
     if not addonPath.is_file():
         raise ManifestError(f"Add-on package was not found: {addonPath}")
-    manifest = _read_addon_manifest(addonPath)
-    addonId = _require_manifest_value(manifest, "name")
-    if addonId != ADDON_ID:
-        raise ManifestError(f"Expected add-on id {ADDON_ID}, found {addonId}.")
-    version = _require_manifest_value(manifest, "version")
-    if not VERSION_RE.match(version):
-        raise ManifestError(f"Version is not safe for a release URL: {version}")
-    buildInfo = _read_addon_build_info(addonPath, version)
+    try:
+        with zipfile.ZipFile(addonPath, "r") as archive:
+            try:
+                manifest = _read_manifest_from_archive(archive, "manifest.ini")
+            except KeyError as exc:
+                raise ManifestError(f"{addonPath} does not contain manifest.ini.") from exc
+            addonId = _require_manifest_value(manifest, "name")
+            if addonId != ADDON_ID:
+                raise ManifestError(f"Expected add-on id {ADDON_ID}, found {addonId}.")
+            version = _require_manifest_value(manifest, "version")
+            if not VERSION_RE.match(version):
+                raise ManifestError(f"Version is not safe for a release URL: {version}")
+            _version_sort_key(version)
+            buildInfo = _read_addon_build_info_from_archive(archive, version)
+            notesByLocale = _read_release_notes_by_locale_from_archive(archive)
+    except ManifestError:
+        raise
+    except (OSError, zipfile.BadZipFile, UnicodeDecodeError) as exc:
+        raise ManifestError(f"Could not read {addonPath} as an NVDA add-on package: {exc}") from exc
     expectedFileName = f"{ADDON_ID}-{version}.nvda-addon"
     if addonPath.name != expectedFileName and not allowNameMismatch:
         raise ManifestError(
@@ -313,11 +358,13 @@ def build_update_manifest(
     except (KeyError, IndexError, ValueError) as exc:
         raise ManifestError(f"Invalid URL template: {exc}") from exc
     parsedUrl = urlparse(url)
-    if parsedUrl.scheme.lower() != "https" or not parsedUrl.netloc:
-        raise ManifestError(f"Formatted download URL must start with https://, got {url!r}.")
+    if parsedUrl.scheme.lower() != "https" or not parsedUrl.netloc or any(ch.isspace() for ch in url):
+        raise ManifestError(f"Formatted download URL must be a valid https:// URL, got {url!r}.")
     packageSize = addonPath.stat().st_size
     if packageSize <= 0:
         raise ManifestError(f"Add-on package is empty: {addonPath}")
+    if packageSize > MAX_UPDATE_PACKAGE_BYTES:
+        raise ManifestError(f"Add-on package exceeds maximum supported size ({MAX_UPDATE_PACKAGE_BYTES} bytes).")
     updateManifest: dict[str, object] = {
         "schema": 2,
         "addonId": addonId,
@@ -334,7 +381,6 @@ def build_update_manifest(
         "size": packageSize,
         "releaseNotes": str(manifest.get("changelog") or "").strip(),
     }
-    notesByLocale = _read_release_notes_by_locale(addonPath)
     if notesByLocale:
         updateManifest["releaseNotesByLocale"] = notesByLocale
     return updateManifest

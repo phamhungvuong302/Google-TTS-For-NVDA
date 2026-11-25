@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import VoiceCatalog, VoicePackage, is_package_supported_by_engine
+from .language_utils import get_nvda_logger
+
+log = get_nvda_logger()
 
 try:
     import addonHandler
@@ -45,13 +48,29 @@ _VERIFICATION_CACHE_VERSION = 1
 _VERIFICATION_CACHE_FILE = "verified_voices.json"
 
 
+class VoicePackageError(RuntimeError):
+    """User-facing error raised during voice package download, import, or verification."""
+
+
+def _https_download_error(packageId: str) -> VoicePackageError:
+    return VoicePackageError(
+        _("Voice package {package} must be downloaded over a secure HTTPS connection.").format(package=packageId)
+    )
+
+
+def _size_limit_error(packageId: str) -> VoicePackageError:
+    return VoicePackageError(
+        _("Voice package {package} is larger than the supported download limit.").format(package=packageId)
+    )
+
+
 class _HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Reject HTTP redirects that downgrade HTTPS voice package downloads."""
 
     def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
         resolvedUrl = urllib.parse.urljoin(req.full_url, str(newurl))
         if urllib.parse.urlparse(resolvedUrl).scheme.lower() != "https":
-            raise RuntimeError("Voice package downloads must remain on a secure HTTPS connection.")
+            raise VoicePackageError(_("Voice package downloads must remain on a secure HTTPS connection."))
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -167,13 +186,16 @@ def _load_persistent_verification_cache() -> dict[str, dict[str, object]]:
             _persistentVerifiedPackageCache = {}
             return _persistentVerifiedPackageCache
         except OSError:
+            log.debugWarning("Could not read Google TTS voice verification cache at %s.", cachePath, exc_info=True)
             # Leave _persistentVerifiedPackageCache unset so transient read failures retry later.
             return {}
-        except json.JSONDecodeError:
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            log.debugWarning("Resetting invalid Google TTS voice verification cache at %s.", cachePath, exc_info=True)
             _persistentVerifiedPackageCache = {}
             _save_persistent_verification_cache()
             return _persistentVerifiedPackageCache
         if not isinstance(raw, dict) or raw.get("version") != _VERIFICATION_CACHE_VERSION:
+            log.debugWarning("Resetting incompatible Google TTS voice verification cache at %s.", cachePath)
             _persistentVerifiedPackageCache = {}
             _save_persistent_verification_cache()
             return _persistentVerifiedPackageCache
@@ -215,9 +237,33 @@ def _save_persistent_verification_cache() -> None:
             os.replace(tmpPath, cachePath)
             tmpPath = None
         except OSError:
+            log.debugWarning("Could not save Google TTS voice verification cache at %s.", cachePath, exc_info=True)
             if tmpPath is not None:
                 with contextlib.suppress(OSError):
                     tmpPath.unlink()
+
+
+def _persistent_entry_matches(entry: Any, package: VoicePackage, stat: os.stat_result) -> bool:
+    if not isinstance(entry, dict) or not package.sha256Checksum:
+        return False
+    expectedHash = package.sha256Checksum.lower()
+    return (
+        entry.get("fileName") == package.fileName
+        and entry.get("size") == stat.st_size
+        and entry.get("mtimeNs") == stat.st_mtime_ns
+        and str(entry.get("expectedSha256") or "").lower() == expectedHash
+        and str(entry.get("verifiedSha256") or "").lower() == expectedHash
+    )
+
+
+def _build_persistent_entry(package: VoicePackage, stat: os.stat_result, actualHash: str) -> dict[str, object]:
+    return {
+        "fileName": package.fileName,
+        "size": stat.st_size,
+        "mtimeNs": stat.st_mtime_ns,
+        "expectedSha256": package.sha256Checksum.lower(),
+        "verifiedSha256": actualHash.lower(),
+    }
 
 
 def _persistent_cache_matches(package: VoicePackage, stat: os.stat_result) -> bool:
@@ -225,17 +271,7 @@ def _persistent_cache_matches(package: VoicePackage, stat: os.stat_result) -> bo
         return False
     with _verificationCacheLock:
         cache = _load_persistent_verification_cache()
-        entry = cache.get(package.id)
-        if not isinstance(entry, dict):
-            return False
-        expectedHash = package.sha256Checksum.lower()
-        return (
-            entry.get("fileName") == package.fileName
-            and entry.get("size") == stat.st_size
-            and entry.get("mtimeNs") == stat.st_mtime_ns
-            and str(entry.get("expectedSha256") or "").lower() == expectedHash
-            and str(entry.get("verifiedSha256") or "").lower() == expectedHash
-        )
+        return _persistent_entry_matches(cache.get(package.id), package, stat)
 
 
 def _remember_verified_package(
@@ -255,13 +291,7 @@ def _remember_verified_package(
         cache = _load_persistent_verification_cache()
         if _persistentVerifiedPackageCache is None:
             return False
-        cache[package.id] = {
-            "fileName": package.fileName,
-            "size": stat.st_size,
-            "mtimeNs": stat.st_mtime_ns,
-            "expectedSha256": package.sha256Checksum.lower(),
-            "verifiedSha256": actualHash.lower(),
-        }
+        cache[package.id] = _build_persistent_entry(package, stat, actualHash)
     if savePersistent:
         _save_persistent_verification_cache()
     return True
@@ -382,6 +412,21 @@ def physically_installed_packages(catalog: VoiceCatalog) -> list[VoicePackage]:
     filesByName = _voice_files_by_name()
     installed: list[VoicePackage] = []
     verificationCacheUpdated = False
+
+    def _evict_or_recheck(package: VoicePackage, startGen: int) -> None:
+        nonlocal verificationCacheUpdated
+        mutated = False
+        with _verificationCacheLock:
+            if _packageStateGenerations.get(package.id, 0) != startGen:
+                mutated = True
+            else:
+                _verifiedPackageCache.pop(package.id, None)
+                if persistentLoaded and package.id in persistentCache:
+                    persistentCache.pop(package.id, None)
+                    verificationCacheUpdated = True
+        if mutated and is_package_installed(package):
+            installed.append(package)
+
     for package in catalog.packages:
         startGen = startGens[package.id]
         try:
@@ -390,32 +435,12 @@ def physically_installed_packages(catalog: VoiceCatalog) -> list[VoicePackage]:
             continue
         fileInfo = filesByName.get(expectedPath.name)
         if fileInfo is None:
-            mutated = False
-            with _verificationCacheLock:
-                if _packageStateGenerations.get(package.id, 0) != startGen:
-                    mutated = True
-                else:
-                    _verifiedPackageCache.pop(package.id, None)
-                    if persistentLoaded and package.id in persistentCache:
-                        persistentCache.pop(package.id, None)
-                        verificationCacheUpdated = True
-            if mutated and is_package_installed(package):
-                installed.append(package)
+            _evict_or_recheck(package, startGen)
             continue
         path, stat = fileInfo
         cacheKey = _cache_key(package, stat)
         if package.compressedSize < 0 or (package.compressedSize and stat.st_size != package.compressedSize):
-            mutated = False
-            with _verificationCacheLock:
-                if _packageStateGenerations.get(package.id, 0) != startGen:
-                    mutated = True
-                else:
-                    _verifiedPackageCache.pop(package.id, None)
-                    if persistentLoaded and package.id in persistentCache:
-                        persistentCache.pop(package.id, None)
-                        verificationCacheUpdated = True
-            if mutated and is_package_installed(package):
-                installed.append(package)
+            _evict_or_recheck(package, startGen)
             continue
         mutated = False
         alreadyHandled = False
@@ -425,23 +450,10 @@ def physically_installed_packages(catalog: VoiceCatalog) -> list[VoicePackage]:
             elif _verifiedPackageCache.get(package.id) == cacheKey:
                 installed.append(package)
                 alreadyHandled = True
-            else:
-                persistentMatch = False
-                if package.sha256Checksum and package.id in persistentCache:
-                    entry = persistentCache[package.id]
-                    if isinstance(entry, dict):
-                        expectedHash = package.sha256Checksum.lower()
-                        persistentMatch = (
-                            entry.get("fileName") == package.fileName
-                            and entry.get("size") == stat.st_size
-                            and entry.get("mtimeNs") == stat.st_mtime_ns
-                            and str(entry.get("expectedSha256") or "").lower() == expectedHash
-                            and str(entry.get("verifiedSha256") or "").lower() == expectedHash
-                        )
-                if persistentMatch:
-                    _verifiedPackageCache[package.id] = cacheKey
-                    installed.append(package)
-                    alreadyHandled = True
+            elif _persistent_entry_matches(persistentCache.get(package.id), package, stat):
+                _verifiedPackageCache[package.id] = cacheKey
+                installed.append(package)
+                alreadyHandled = True
         if mutated:
             if is_package_installed(package):
                 installed.append(package)
@@ -451,19 +463,10 @@ def physically_installed_packages(catalog: VoiceCatalog) -> list[VoicePackage]:
         try:
             actualHash = sha256(path).lower() if package.sha256Checksum else None
         except OSError:
+            _evict_or_recheck(package, startGen)
             continue
         if actualHash is not None and actualHash != package.sha256Checksum.lower():
-            mutated = False
-            with _verificationCacheLock:
-                if _packageStateGenerations.get(package.id, 0) != startGen:
-                    mutated = True
-                else:
-                    _verifiedPackageCache.pop(package.id, None)
-                    if persistentLoaded and package.id in persistentCache:
-                        persistentCache.pop(package.id, None)
-                        verificationCacheUpdated = True
-            if mutated and is_package_installed(package):
-                installed.append(package)
+            _evict_or_recheck(package, startGen)
             continue
         with _verificationCacheLock:
             if _packageStateGenerations.get(package.id, 0) != startGen:
@@ -471,13 +474,7 @@ def physically_installed_packages(catalog: VoiceCatalog) -> list[VoicePackage]:
             else:
                 _verifiedPackageCache[package.id] = cacheKey
                 if persistentLoaded and package.sha256Checksum and actualHash is not None:
-                    persistentCache[package.id] = {
-                        "fileName": package.fileName,
-                        "size": stat.st_size,
-                        "mtimeNs": stat.st_mtime_ns,
-                        "expectedSha256": package.sha256Checksum.lower(),
-                        "verifiedSha256": actualHash.lower(),
-                    }
+                    persistentCache[package.id] = _build_persistent_entry(package, stat, actualHash)
                     verificationCacheUpdated = True
                 installed.append(package)
         if mutated and is_package_installed(package):
@@ -544,6 +541,24 @@ def remove_package(package: VoicePackage) -> None:
         _clear_readonly_attr(path)
         with contextlib.suppress(FileNotFoundError):
             path.unlink()
+        # Bump generation after unlink too so concurrent readers that observed
+        # the file before unlink cannot resurrect a stale verification cache entry.
+        _bump_package_state_generation(package.id)
+        _forget_verified_package(package.id)
+
+
+def _commit_verified_temp_package(
+    tmpPath: Path,
+    target: Path,
+    package: VoicePackage,
+    actualHash: str | None,
+) -> None:
+    _bump_package_state_generation(package.id)
+    _forget_verified_package(package.id)
+    _clear_readonly_attr(target)
+    os.replace(tmpPath, target)
+    _bump_package_state_generation(package.id)
+    _remember_verified_package(package, target.stat(), actualHash)
 
 
 def _verify_package_file(filePath: Path, package: VoicePackage, failureMessage: str) -> str | None:
@@ -554,12 +569,12 @@ def _verify_package_file(filePath: Path, package: VoicePackage, failureMessage: 
         or fileStat.st_size > VOICE_PACKAGE_MAX_BYTES
         or (package.compressedSize and fileStat.st_size != package.compressedSize)
     ):
-        raise RuntimeError(failureMessage)
+        raise VoicePackageError(failureMessage)
     if not package.sha256Checksum:
         return None
     actualHash = sha256(filePath)
     if actualHash.lower() != package.sha256Checksum.lower():
-        raise RuntimeError(failureMessage)
+        raise VoicePackageError(failureMessage)
     return actualHash
 
 
@@ -571,13 +586,13 @@ def download_package(package: VoicePackage, progress: ProgressCallback | None = 
                 progress(100, _("{package} is already installed.").format(package=package.id))
             return target
         if not package.url:
-            raise RuntimeError(
+            raise VoicePackageError(
                 _("No download link is available for voice package {package}.").format(package=package.id)
             )
         if urllib.parse.urlparse(package.url).scheme.lower() != "https":
-            raise RuntimeError(f"Voice package {package.id} must be downloaded over a secure HTTPS connection.")
+            raise _https_download_error(package.id)
         if package.compressedSize < 0 or package.compressedSize > VOICE_PACKAGE_MAX_BYTES:
-            raise RuntimeError(f"Voice package {package.id} is larger than the supported download limit.")
+            raise _size_limit_error(package.id)
         target.parent.mkdir(parents=True, exist_ok=True)
         if progress:
             progress(0, _("Downloading {package}.").format(package=package.id))
@@ -589,9 +604,7 @@ def download_package(package: VoicePackage, progress: ProgressCallback | None = 
                 finalUrl = geturl() if callable(geturl) else None
                 if isinstance(finalUrl, str) and finalUrl:
                     if urllib.parse.urlparse(finalUrl).scheme.lower() != "https":
-                        raise RuntimeError(
-                            f"Voice package {package.id} must be downloaded over a secure HTTPS connection."
-                        )
+                        raise _https_download_error(package.id)
                 rawContentLength = response.headers.get("Content-Length")
                 try:
                     total = int(rawContentLength) if rawContentLength is not None else int(package.compressedSize or 0)
@@ -600,7 +613,7 @@ def download_package(package: VoicePackage, progress: ProgressCallback | None = 
                 if total < 0:
                     total = int(package.compressedSize or 0)
                 if total < 0 or total > VOICE_PACKAGE_MAX_BYTES:
-                    raise RuntimeError(f"Voice package {package.id} is larger than the supported download limit.")
+                    raise _size_limit_error(package.id)
                 with tempfile.NamedTemporaryFile(
                     mode="wb",
                     dir=target.parent,
@@ -617,9 +630,7 @@ def download_package(package: VoicePackage, progress: ProgressCallback | None = 
                         output.write(chunk)
                         downloaded += len(chunk)
                         if downloaded > VOICE_PACKAGE_MAX_BYTES:
-                            raise RuntimeError(
-                                f"Voice package {package.id} is larger than the supported download limit."
-                            )
+                            raise _size_limit_error(package.id)
                         if progress and total:
                             percent = min(99, int(downloaded * 100 / total))
                             if percent != lastPercent:
@@ -629,12 +640,8 @@ def download_package(package: VoicePackage, progress: ProgressCallback | None = 
                 "Voice package {package} did not pass verification after download. Please try downloading it again."
             ).format(package=package.id)
             actualHash = _verify_package_file(tmpPath, package, verifyError)
-            _bump_package_state_generation(package.id)
-            _forget_verified_package(package.id)
-            _clear_readonly_attr(target)
-            os.replace(tmpPath, target)
+            _commit_verified_temp_package(tmpPath, target, package, actualHash)
             tmpPath = None
-            _remember_verified_package(package, target.stat(), actualHash)
         finally:
             if tmpPath is not None:
                 _clear_readonly_attr(tmpPath)
@@ -663,7 +670,7 @@ def copy_existing_package(source: Path, package: VoicePackage) -> Path:
             _remember_verified_package(package, targetStat, actualHash)
             return target
         if source.stat().st_size > VOICE_PACKAGE_MAX_BYTES:
-            raise RuntimeError(verifyError)
+            raise VoicePackageError(verifyError)
         tmpPath: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -676,12 +683,8 @@ def copy_existing_package(source: Path, package: VoicePackage) -> Path:
                 tmpPath = Path(handle.name)
             shutil.copyfile(source, tmpPath)
             actualHash = _verify_package_file(tmpPath, package, verifyError)
-            _bump_package_state_generation(package.id)
-            _forget_verified_package(package.id)
-            _clear_readonly_attr(target)
-            os.replace(tmpPath, target)
+            _commit_verified_temp_package(tmpPath, target, package, actualHash)
             tmpPath = None
-            _remember_verified_package(package, target.stat(), actualHash)
             return target
         finally:
             if tmpPath is not None:

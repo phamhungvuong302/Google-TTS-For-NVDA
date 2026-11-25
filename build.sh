@@ -8,7 +8,7 @@
 # either. Keep build.bat and build.sh in sync when the build steps change.
 set -uo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")"
+cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 
 EXIT_CODE=0
 
@@ -28,7 +28,7 @@ echo "============================================"
 echo
 
 # --------------- Read version from manifest.ini ---------------
-VERSION="$(python3 -B -c "import re; m = re.search(r'(?m)^version\s*=\s*([^\r\n#]+)', open('googleTtsForNvda/manifest.ini', encoding='utf-8-sig').read()); print(m.group(1).strip().strip('\"\'') if m else '')")"
+VERSION="$(python3 -B -c "import re; m = re.search(r'(?m)^\s*version\s*=\s*([^\r\n#]+)', open('googleTtsForNvda/manifest.ini', encoding='utf-8-sig').read()); print(m.group(1).strip().strip('\"\'') if m else '')")"
 
 if [ -z "${VERSION:-}" ]; then
     echo "[ERROR] Could not read version from manifest.ini."
@@ -46,14 +46,14 @@ if [ -f "googleTtsForNvda/googleTtsForNvda.nvda-addon" ]; then
     echo "      Removed stale .nvda-addon from source tree."
 fi
 if [ -d "googleTtsForNvda/doc" ]; then
-    find googleTtsForNvda/doc \( -name "*.mo" -o -name "*.po" -o -name "*.md" \) -type f -delete 2>/dev/null || true
+    find googleTtsForNvda/doc -name "*.mo" -type f -delete 2>/dev/null || true
 fi
 echo "      Done."
 echo
 
 # --------------- Merge conflict marker check ---------------
 echo "[2/6] Checking for unresolved merge conflict markers..."
-if ! python3 -B -c "import pathlib, sys; exts = {'.py', '.js', '.html', '.ini', '.json', '.bat', '.sh', '.md', '.po', '.pot', '.toml'}; files = [p for d in ('googleTtsForNvda', 'tests') if pathlib.Path(d).is_dir() for p in sorted(pathlib.Path(d).rglob('*')) if p.is_file() and p.suffix in exts] + [p for p in sorted(pathlib.Path('.').iterdir()) if p.is_file() and p.suffix in exts]; hits = [(p, i, s) for p in files for i, s in enumerate(p.read_text(encoding='utf-8', errors='replace').splitlines(), 1) if s in ('<<<<<<<', '=======', '>>>>>>>') or s.startswith(('<<<<<<< ', '>>>>>>> '))]; [print(f'      [ERROR] {p}:{i}: {s.strip()}') for p, i, s in hits]; sys.exit(1 if hits else 0)"; then
+if ! python3 -B -c "import pathlib, sys; exts = {'.py', '.js', '.html', '.ini', '.json', '.bat', '.sh', '.md', '.po', '.pot', '.toml', '.txt', '.yml', '.yaml'}; files = [p for d in ('googleTtsForNvda', 'tests', '.github') if pathlib.Path(d).is_dir() for p in sorted(pathlib.Path(d).rglob('*')) if p.is_file() and p.suffix.lower() in exts] + [p for p in sorted(pathlib.Path('.').iterdir()) if p.is_file() and p.suffix.lower() in exts]; hits = [(p, i, s) for p in files for i, s in enumerate(p.read_text(encoding='utf-8', errors='replace').splitlines(), 1) if s in ('<<<<<<<', '|||||||', '>>>>>>>') or s.startswith(('<<<<<<< ', '||||||| ', '>>>>>>> ')) or (s == '=======' and p.suffix.lower() != '.md')]; [print(f'      [ERROR] {p}:{i}: {s.strip()}') for p, i, s in hits]; sys.exit(1 if hits else 0)"; then
     echo "[ERROR] Unresolved merge conflict markers found."
     EXIT_CODE=1
     exit "$EXIT_CODE"
@@ -86,7 +86,7 @@ echo "[5/6] Verifying no .zvoice files in source tree..."
 ZVOICE_FILES=()
 while IFS= read -r -d '' f; do
     ZVOICE_FILES+=("$f")
-done < <(find googleTtsForNvda -name '*.zvoice' -type f -print0)
+done < <(find googleTtsForNvda -iname '*.zvoice' -type f -print0)
 if [ "${#ZVOICE_FILES[@]}" -gt 0 ]; then
     for f in "${ZVOICE_FILES[@]}"; do
         echo "      [ERROR] Found .zvoice file: $f"
@@ -110,7 +110,7 @@ rm -f "$OUTPUT"
 # Package the contents of googleTtsForNvda/ at the archive root (manifest.ini
 # must land at the top level) using Python's standard zipfile with DEFLATE
 # level 9 compression, excluding dotfiles/dotdirs and transient build junk.
-if ! python3 -B -c "import pathlib, sys, zipfile; root = pathlib.Path('googleTtsForNvda'); skip_names = {'thumbs.db', 'ehthumbs.db', 'desktop.ini'}; skip_suffixes = {'.pyc', '.pyo', '.zvoice'}; doc_skip = {'.mo', '.po', '.md'}; zf = zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED, compresslevel=9); [zf.write(p, p.relative_to(root).as_posix()) for p in sorted(root.rglob('*')) if p.is_file() and (rel := p.relative_to(root)) and not any(part.startswith('.') or part == '__pycache__' for part in rel.parts) and p.suffix.lower() not in skip_suffixes and p.name.lower() not in skip_names and not p.name.endswith('~') and not (len(rel.parts) > 1 and rel.parts[0] == 'doc' and p.suffix.lower() in doc_skip)]; zf.close()" "$OUTPUT"; then
+if ! python3 -B -c "import os, pathlib, sys, zipfile; root = pathlib.Path('googleTtsForNvda'); out = pathlib.Path(sys.argv[1]); tmp = out.with_name(f'.{out.name}.tmp'); skip_names = {'thumbs.db', 'ehthumbs.db', 'desktop.ini'}; skip_suffixes = {'.pyc', '.pyo', '.zvoice', '.pot', '.nvda-addon', '.tmp'}; doc_skip = {'.mo', '.po', '.md'}; tmp.unlink(missing_ok=True); exec('try:\n with zipfile.ZipFile(tmp, \"w\", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:\n  for p in sorted(root.rglob(\"*\")):\n   if not p.is_file(): continue\n   rel = p.relative_to(root)\n   if any(part.startswith(\".\") or part == \"__pycache__\" for part in rel.parts): continue\n   if p.suffix.lower() in skip_suffixes or p.name.lower() in skip_names or p.name.endswith(\"~\"): continue\n   if len(rel.parts) > 1 and rel.parts[0] == \"doc\" and p.suffix.lower() in doc_skip: continue\n   zf.write(p, rel.as_posix())\n os.replace(tmp, out)\nexcept BaseException:\n tmp.unlink(missing_ok=True)\n raise')" "$OUTPUT"; then
     echo "[ERROR] Packaging failed."
     EXIT_CODE=1
     exit "$EXIT_CODE"

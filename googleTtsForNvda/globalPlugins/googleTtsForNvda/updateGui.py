@@ -1,21 +1,17 @@
 from __future__ import annotations
 
-import builtins
 import contextlib
-import inspect
 import threading
 import weakref
 from collections.abc import Callable
 
 import addonHandler
 import config
-import gui
 import languageHandler
 import ui
 import wx
 from gui import guiHelper
-from logHandler import log
-from synthDrivers.googleTtsForNvda import audio_math
+from synthDrivers.googleTtsForNvda import audio_math, language_utils
 from synthDrivers.googleTtsForNvda.bridge import (
     CONFIG_AUTO_UPDATE_CHECK,
     CONFIG_SECTION,
@@ -25,14 +21,14 @@ from synthDrivers.googleTtsForNvda.bridge import (
 from . import updater
 from .uiUtils import (
     _from_dip,
+    call_compat,
     dialog_parent,
     is_modal_dialog_open,
     is_secure_mode,
     is_windows_store_nvda,
-    post_popup,
-    pre_popup,
+    nvda_translate,
+    popup_parent_context,
     show_message_box,
-    window_is_alive,
 )
 from .uiUtils import (
     bind_read_only_text_focus_announcement as _bind_read_only_text_focus_announcement,
@@ -41,35 +37,12 @@ from .uiUtils import (
     resize_read_only_text_for_content as _resize_read_only_text_for_content,
 )
 
-# Keep NVDA's translator for generic core strings before installing the add-on translation.
-_nvda_gettext = getattr(builtins, "_", lambda message: message)
+log = language_utils.get_nvda_logger()
+
 addonHandler.initTranslation()
 
 _CHECK_MODE_MANUAL = "manual"
 _CHECK_MODE_AUTOMATIC = "automatic"
-
-
-def _nvda_translate(message: str) -> str:
-    try:
-        return _nvda_gettext(message)
-    except Exception:
-        return message
-
-
-def _window_is_alive(window: wx.Window | None) -> bool:
-    return window_is_alive(window)
-
-
-def _dialog_parent(preferredParent: wx.Window | None = None) -> wx.Window | None:
-    return dialog_parent(preferredParent)
-
-
-def _pre_popup() -> None:
-    pre_popup()
-
-
-def _post_popup() -> None:
-    post_popup()
 
 
 def _message_box(message: str, style: int, parent: wx.Window | None = None) -> int:
@@ -85,7 +58,7 @@ def automatic_update_check_enabled() -> bool:
     try:
         value = config.conf[CONFIG_SECTION][CONFIG_AUTO_UPDATE_CHECK]
     except Exception:
-        log.debug("Could not read Google TTS For NVDA automatic update check setting.", exc_info=True)
+        log.debugWarning("Could not read Google TTS For NVDA automatic update check setting.", exc_info=True)
         return DEFAULT_AUTO_UPDATE_CHECK
     return audio_math.coerce_bool(value, DEFAULT_AUTO_UPDATE_CHECK)
 
@@ -94,14 +67,14 @@ def set_automatic_update_check_enabled(enabled: bool) -> None:
     try:
         config.conf[CONFIG_SECTION][CONFIG_AUTO_UPDATE_CHECK] = bool(enabled)
     except Exception:
-        log.debug("Could not save Google TTS For NVDA automatic update check setting.", exc_info=True)
+        log.debugWarning("Could not save Google TTS For NVDA automatic update check setting.", exc_info=True)
 
 
 def _current_version_for_status() -> str:
     try:
         return updater.current_version()
     except updater.UpdateError:
-        return _nvda_translate("unknown")
+        return nvda_translate("unknown")
 
 
 def update_check_in_progress() -> bool:
@@ -382,11 +355,13 @@ class _UpdateCheckController:
 
     def _parent(self) -> wx.Window | None:
         parent = self._parentRef() if self._parentRef is not None else None
-        return _dialog_parent(parent)
+        return dialog_parent(parent)
 
     def start(self) -> None:
         if self.manual:
             ui.message(_("Checking for Google TTS For NVDA updates..."))
+        else:
+            log.info("Performing automatic Google TTS For NVDA update check.")
         locale = languageHandler.getLanguage()
 
         def run() -> None:
@@ -416,7 +391,7 @@ class _UpdateCheckController:
                     self._parent(),
                 )
             else:
-                log.debug(
+                log.debugWarning(
                     "Automatic Google TTS For NVDA update check failed.",
                     exc_info=(type(result), result, result.__traceback__),
                 )
@@ -470,7 +445,7 @@ class _UpdateCheckController:
         try:
             answer = self._show_update_available_dialog(parent, result)
         except Exception:
-            log.debug("Could not show the Google TTS For NVDA update prompt.", exc_info=True)
+            log.debugWarning("Could not show the Google TTS For NVDA update prompt.", exc_info=True)
             updater.remove_update_manifest(result)
             _finish_update_check()
             return
@@ -481,19 +456,12 @@ class _UpdateCheckController:
         _finish_update_check()
 
     def _show_update_available_dialog(self, parent: wx.Window, result: updater.UpdateCheckResult) -> int:
-        mainFrame = getattr(gui, "mainFrame", None)
-        wrapPopup = parent is mainFrame and mainFrame is not None and _window_is_alive(mainFrame)
-        if wrapPopup:
-            _pre_popup()
-        try:
-            dialog = _UpdateAvailableDialog(parent, result)
+        with popup_parent_context(parent) as dialogParent:
+            dialog = _UpdateAvailableDialog(dialogParent or parent, result)
             try:
                 return dialog.ShowModal()
             finally:
                 dialog.Destroy()
-        finally:
-            if wrapPopup:
-                _post_popup()
 
     def _start_download(self, updateCheckResult: updater.UpdateCheckResult) -> None:
         parent = self._parent()
@@ -529,21 +497,16 @@ class _UpdateCheckController:
                 if progressBucket == lastProgressBucket and received < total:
                     return
                 lastProgressBucket = progressBucket
-                with contextlib.suppress(RuntimeError, AttributeError):
+                with contextlib.suppress(RuntimeError, AttributeError, AssertionError):
                     wx.CallAfter(dialog.update_progress, result.update.version, received, total)
 
             try:
-                downloadKwargs: dict[str, object] = {
-                    "progress": progress,
-                    "cancel_requested": dialog.cancelEvent.is_set,
-                }
-                with contextlib.suppress(TypeError, ValueError):
-                    params = inspect.signature(updater.download_update).parameters
-                    if "on_response" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
-                        downloadKwargs["on_response"] = dialog.set_active_response
-                downloadedUpdate = updater.download_update(
+                downloadedUpdate: object = call_compat(
+                    updater.download_update,
                     result.update,
-                    **downloadKwargs,  # type: ignore[arg-type]
+                    progress=progress,
+                    cancel_requested=dialog.cancelEvent.is_set,
+                    on_response=dialog.set_active_response,
                 )
             except Exception as exc:
                 downloadedUpdate = exc
@@ -559,20 +522,18 @@ class _UpdateCheckController:
             callAfter(worker.start)
         else:
             worker.start()
-        mainFrame = getattr(gui, "mainFrame", None)
-        wrapPopup = parent is mainFrame and mainFrame is not None and _window_is_alive(mainFrame)
-        if wrapPopup:
-            _pre_popup()
-        try:
-            if not dialog._finished:
-                dialog.ShowModal()
-            return dialog.result
-        finally:
-            if dialog.result is None:
-                dialog._cancel_download()
-            dialog.Destroy()
-            if wrapPopup:
-                _post_popup()
+        with popup_parent_context(parent):
+            try:
+                if not dialog._finished:
+                    dialog.ShowModal()
+                downloadResult = dialog.result
+            finally:
+                if dialog.result is None:
+                    dialog._cancel_download()
+                dialog.Destroy()
+        if downloadResult is None and dialog.cancelEvent.is_set():
+            return updater.UpdateCancelled("The update download was cancelled.")
+        return downloadResult
 
     def _finish_download(
         self,
@@ -610,36 +571,38 @@ class _UpdateCheckController:
             return
         updater.remove_update_manifest(updateCheckResult)
         installError = False
-        dialogParent = _dialog_parent(parent)
-        mainFrame = getattr(gui, "mainFrame", None)
-        wrapPopup = dialogParent is mainFrame and mainFrame is not None and _window_is_alive(mainFrame)
-        if wrapPopup:
-            _pre_popup()
+        installed = False
+        addonGui: object = None
+        dialogParent = dialog_parent(parent)
+        if dialogParent is None:
+            log.warning("Skipping Google TTS For NVDA update installation because no parent window is alive.")
+            updater.remove_downloaded_update(result)
+            _finish_update_check()
+            return
         try:
-            from gui import addonGui
+            with popup_parent_context(dialogParent) as resolvedParent:
+                from gui import addonGui as nvdaAddonGui
 
-            installed = addonGui.installAddon(dialogParent, str(result.path))
+                addonGui = nvdaAddonGui
+                installed = bool(nvdaAddonGui.installAddon(resolvedParent, str(result.path)))
         except Exception as exc:
             log.error("Could not install downloaded Google TTS For NVDA update: %s", exc, exc_info=True)
             installError = True
-            installed = False
+        finally:
+            updater.remove_downloaded_update(result)
+            _finish_update_check()
+        if installError:
             _message_box(
                 _("The update was downloaded, but NVDA could not start the add-on installer."),
                 wx.OK | wx.ICON_ERROR,
                 dialogParent,
             )
-        finally:
-            if wrapPopup:
-                _post_popup()
-            updater.remove_downloaded_update(result)
-            _finish_update_check()
-        if installError:
             return
         if installed:
             try:
                 wx.CallAfter(addonGui.promptUserForRestart)
             except Exception:
-                log.debug("Could not show NVDA restart prompt after Google TTS For NVDA update.", exc_info=True)
+                log.debugWarning("Could not show NVDA restart prompt after Google TTS For NVDA update.", exc_info=True)
         else:
             ui.message(_("Google TTS For NVDA update installation was cancelled or did not complete."))
 
@@ -677,8 +640,12 @@ def _start_update_check(mode: str, parent: wx.Window | None = None) -> bool:
         if mode == _CHECK_MODE_MANUAL:
             ui.message(_("Google TTS For NVDA is already checking for updates."))
         return False
-    controller = _UpdateCheckController(mode, parent)
-    controller.start()
+    try:
+        controller = _UpdateCheckController(mode, parent)
+        controller.start()
+    except Exception:
+        _finish_update_check()
+        raise
     return True
 
 

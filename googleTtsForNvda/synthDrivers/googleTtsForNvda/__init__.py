@@ -5,6 +5,7 @@ import inspect
 import json
 import math
 import queue
+import sys
 import threading
 from collections import OrderedDict, deque
 from collections.abc import Callable, Iterator, Sequence
@@ -24,7 +25,6 @@ except ImportError:
     speechDictHandler = None  # type: ignore[assignment]
 from autoSettingsUtils.driverSetting import DriverSetting
 from autoSettingsUtils.utils import StringParameterInfo
-from logHandler import log
 from nvwave import WavePlayer
 from speech.commands import (
     BreakCommand,
@@ -51,11 +51,12 @@ from .bridge import (
     DEFAULT_AUTO_LANGUAGE_PROFILES,
     SAMPLE_RATE,
     CdpCancelled,
+    CdpError,
     ChromeTtsBridge,
     edge_webview2_blocks_effective_runtime,
     ensure_config_spec,
 )
-from .catalog import EngineLibraryError, VoiceCatalog, engine_library_error_message
+from .catalog import ENGINE_VERSION, EngineLibraryError, VoiceCatalog, engine_library_error_message
 from .language_profiles import (
     LANGUAGE_WORD_RE as _LANGUAGE_WORD_RE,
 )
@@ -68,6 +69,7 @@ from .language_profiles import (
 from .language_profiles import (
     normalize_mathematical_alphanumeric as _normalize_mathematical_alphanumeric,
 )
+from .language_utils import get_nvda_logger, is_debug_for_synth_driver
 from .speech_processing import (
     DEFAULT_TEXT_SEGMENTER as _TEXT_SEGMENTER,
 )
@@ -98,6 +100,8 @@ from .speech_processing import (
 from .speech_processing import (
     pcm_has_audible_sample as _pcm_has_audible_sample,
 )
+
+log = get_nvda_logger()
 
 addonHandler.initTranslation()
 
@@ -138,19 +142,35 @@ _PENDING_POST_STARTUP_HANDLERS: set[Callable[..., Any]] = set()
 _call_compat = language_utils.call_compat
 
 
+def _user_friendly_runtime_error_message(error: BaseException) -> str:
+    """Return a localized user-facing message for speech/browser runtime errors."""
+    if isinstance(error, CdpError):
+        message = str(error).strip()
+        if message:
+            return message
+    return _("Google TTS For NVDA could not start speech in the Chromium browser runtime.")
+
+
 def _show_message_box(
     message: str,
     caption: str,
     style: int,
     parent: Any = None,
 ) -> int:
-    """Display a modal message box across NVDA 2024–2026+ and main."""
+    """Display a modal message box across NVDA 2024–2027."""
     try:
         from globalPlugins.googleTtsForNvda.uiUtils import show_message_box
 
         return int(show_message_box(message, caption, style, parent))
     except Exception:
         return language_utils.show_message_box(message, caption, style, parent)
+
+
+def _is_debug_for_synth_driver() -> bool:
+    return is_debug_for_synth_driver(
+        sys.modules.get("synthDriverHandler") or synthDriverHandler,
+        sys.modules.get("config") or config,
+    )
 
 
 class _SyncedIndexDispatcher:
@@ -223,11 +243,14 @@ class _SyncedIndexDispatcher:
         }
 
         def on_chunk_done() -> None:
-            with state["lock"]:
-                state["done"] = True
-                toNotify = list(state["indexes"])
-                state["indexes"].clear()
-            self._fire_now(toNotify)
+            while True:
+                with state["lock"]:
+                    if not state["indexes"]:
+                        state["done"] = True
+                        return
+                    toNotify = list(state["indexes"])
+                    state["indexes"].clear()
+                self._fire_now(toNotify)
 
         self._lastFeedState = state
         queued = self._driver._feed_audio(pcm, onDone=on_chunk_done)
@@ -452,6 +475,12 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         self._warmupThread: threading.Thread | None = None
         self._warmupCancelEvent = threading.Event()
         self._warm_current_voice_async(delay=_PRELOAD_RESUME_DELAY_SECONDS)
+        log.info(
+            "Loaded Google TTS synth driver (engine %s, %d installed voice packages, %d languages).",
+            ENGINE_VERSION,
+            len(self.catalog.packages),
+            len(self._speakersByLanguage),
+        )
 
     def _player_lock(self) -> threading.RLock | AbstractContextManager[Any]:
         lock = getattr(self, "_playerLock", None)
@@ -557,7 +586,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 if answer == getattr(wx, "ID_OK", wx.OK) or answer == wx.OK:
                     open_voice_manager_download_tab()
             except Exception:
-                log.exception("Could not show Google TTS voice install prompt.", exc_info=True)
+                log.exception("Could not show Google TTS voice install prompt.")
 
         self._run_prompt_when_modal_dialogs_clear(_show_prompt)
 
@@ -568,7 +597,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 
                 show_edge_webview2_prompt()
             except Exception:
-                log.exception("Could not show Microsoft Edge WebView2 Runtime prompt.", exc_info=True)
+                log.exception("Could not show Microsoft Edge WebView2 Runtime prompt.")
 
         self._run_prompt_when_modal_dialogs_clear(_show_prompt)
 
@@ -588,7 +617,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                     wx.OK | wx.ICON_ERROR,
                 )
             except Exception:
-                log.exception("Could not show Google TTS runtime error dialog.", exc_info=True)
+                log.exception("Could not show Google TTS runtime error dialog.")
 
     def _show_engine_library_error(self, error: EngineLibraryError) -> None:
         log.error("Google TTS WASM TTS Engine error: %s", error.technicalDetail)
@@ -622,7 +651,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         try:
             self.cancel()
         except Exception:
-            log.debug("Could not cancel Google TTS speech before fallback.", exc_info=True)
+            log.debugWarning("Could not cancel Google TTS speech before fallback.", exc_info=True)
 
         try:
             import synthDriverHandler
@@ -640,7 +669,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             else:
                 _call_compat(synthDriverHandler.findAndSetNextSynth, self.name)
         except Exception:
-            log.exception("Could not switch to NVDA fallback synthesizer.", exc_info=True)
+            log.exception("Could not switch to NVDA fallback synthesizer.")
 
         try:
             from globalPlugins.googleTtsForNvda.uiUtils import show_runtime_error_dialog
@@ -656,7 +685,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                         wx.OK | wx.ICON_ERROR,
                     )
                 except Exception:
-                    log.exception("Could not show Google TTS fatal error dialog.", exc_info=True)
+                    log.exception("Could not show Google TTS fatal error dialog.")
 
             try:
                 self._schedule_ui_callback(lambda: wx.CallLater(150, show_dialog))
@@ -671,6 +700,10 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         self.cancel()
         with self._speechCondition:
             self._speechCondition.notify_all()
+        for threadAttr in ("_worker", "_warmupThread"):
+            thread = getattr(self, threadAttr, None)
+            if isinstance(thread, threading.Thread) and thread is not threading.current_thread() and thread.is_alive():
+                thread.join(timeout=1.5)
         bridgeReusable = self._bridge_safe_for_standby_release()
         bridgeReleased = False
         releaseFailed = False
@@ -679,22 +712,20 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 bridgeReleased = standby.release_synth_bridge(self._bridge, self.catalog)
             except Exception:
                 releaseFailed = True
-                log.debug("Could not release idle Google TTS browser runtime to standby.", exc_info=True)
+                log.debugWarning("Could not release idle Google TTS browser runtime to standby.", exc_info=True)
         if not bridgeReleased:
             with suppress(Exception):
                 self._bridge.terminate()
-            if not bridgeReusable or releaseFailed:
+            if not bridgeReusable or releaseFailed or not standby.keep_browser_runtime_ready_enabled():
                 reason = (
                     "Google TTS synth released a busy browser runtime"
                     if not bridgeReusable
                     else "Google TTS synth could not release its browser runtime to standby"
                 )
-                with suppress(Exception):
-                    standby.release_synth_without_bridge(reason)
-        for threadAttr in ("_worker", "_warmupThread"):
-            thread = getattr(self, threadAttr, None)
-            if isinstance(thread, threading.Thread) and thread is not threading.current_thread() and thread.is_alive():
-                thread.join(timeout=1.5)
+            else:
+                reason = "Google TTS synth could not hand off its browser runtime to standby"
+            with suppress(Exception):
+                standby.release_synth_without_bridge(reason)
         with self._player_lock():
             player = getattr(self, "_player", None)
             self._player = None
@@ -705,6 +736,9 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             self._clear_short_audio_cache()
 
     def _bridge_safe_for_standby_release(self) -> bool:
+        workerThread = getattr(self, "_worker", None)
+        if workerThread is not None and workerThread.is_alive():
+            return False
         warmupThread = getattr(self, "_warmupThread", None)
         if warmupThread is not None and warmupThread.is_alive():
             return False
@@ -782,7 +816,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             try:
                 return bool(audioDeviceError())
             except Exception:
-                log.debug(
+                log.debugWarning(
                     "Could not query NVDA audio device error state via %s.",
                     apiName,
                     exc_info=True,
@@ -840,8 +874,12 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 
     def _build_available_voices(self) -> OrderedDict[str, VoiceInfo]:
         voices: OrderedDict[str, VoiceInfo] = OrderedDict()
-        for language in self._speakersByLanguage:
-            voices[language] = VoiceInfo(language, self._language_display_name(language), language)
+        voiceEntries = [
+            (language, language_utils.get_language_display_name(language)) for language in self._speakersByLanguage
+        ]
+        voiceEntries.sort(key=lambda item: (language_utils.visible_language_sort_key(item[1]), item[0].lower()))
+        for language, displayName in voiceEntries:
+            voices[language] = VoiceInfo(language, displayName, language)
         return voices
 
     def _getAvailableVoices(self, *args: Any, **kwargs: Any) -> OrderedDict[str, VoiceInfo]:
@@ -851,9 +889,6 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         if hasattr(self, "_speakersByLanguage"):
             return self._build_available_voices()
         return OrderedDict()
-
-    def _language_display_name(self, language: str) -> str:
-        return language_utils.get_language_display_name(language)
 
     def _build_speakers_by_package(self) -> dict[str, list[Any]]:
         return standby._speakers_by_package(self.catalog)
@@ -945,7 +980,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             fullCatalog = VoiceCatalog.load()
             installedPackages = voice_store.installed_packages(fullCatalog)
         except Exception:
-            log.debug("Could not reload installed Google TTS voice catalog.", exc_info=True)
+            log.debugWarning("Could not reload installed Google TTS voice catalog.", exc_info=True)
             return False
         newCatalog = VoiceCatalog(installedPackages)
         if not newCatalog.speakers:
@@ -964,19 +999,19 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             if self.__variant not in self._availableVariants:
                 self.__variant = self._initial_variant(self.__voice)
             self._clear_short_audio_cache()
-            updateBridgeCatalog = getattr(self._bridge, "update_catalog", None)
-            if callable(updateBridgeCatalog):
-                with suppress(Exception):
-                    updateBridgeCatalog(self.catalog)
-            else:
-                self._bridge.catalog = self.catalog
+        updateBridgeCatalog = getattr(self._bridge, "update_catalog", None)
+        if callable(updateBridgeCatalog):
+            with suppress(Exception):
+                updateBridgeCatalog(newCatalog)
+        else:
+            self._bridge.catalog = newCatalog
         self._ensure_config_compat()
         try:
             settingsRing = getattr(globalVars, "settingsRing", None)
             if settingsRing is not None:
                 settingsRing.updateSupportedSettings(self)
         except Exception:
-            log.debug("Could not update NVDA settings ring after Google TTS catalog refresh.", exc_info=True)
+            log.debugWarning("Could not update NVDA settings ring after Google TTS catalog refresh.", exc_info=True)
         self._reload_voice_dict()
         return True
 
@@ -1003,7 +1038,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                     if defaultVal is not None:
                         synthConfig[settingId] = defaultVal
             except Exception:
-                log.debug("Could not ensure Google TTS setting default for %s.", settingId, exc_info=True)
+                log.debugWarning("Could not ensure Google TTS setting default for %s.", settingId, exc_info=True)
 
         try:
             configuredVoice = str(synthConfig.get("voice") or "")
@@ -1022,7 +1057,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             try:
                 synthConfig["variant"] = next(iter(variants))
             except Exception:
-                log.debug("Could not initialize Google TTS variant setting.", exc_info=True)
+                log.debugWarning("Could not initialize Google TTS variant setting.", exc_info=True)
             return
 
         try:
@@ -1037,7 +1072,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             if replacementVariant:
                 synthConfig["variant"] = replacementVariant
         except Exception:
-            log.debug("Could not migrate Google TTS voice/variant settings.", exc_info=True)
+            log.debugWarning("Could not migrate Google TTS voice/variant settings.", exc_info=True)
 
     _ensure_variant_config_compat = _ensure_config_compat
 
@@ -1072,18 +1107,20 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 
         lastSpokenItemIndex = -1
         for seqIdx, seqItem in enumerate(speechSequence):
-            seqItemType = type(seqItem)
-            if seqItemType is str:
+            if isinstance(seqItem, str):
                 if self._sanitize_speech_text(_normalize_mathematical_alphanumeric(seqItem)).strip():
                     lastSpokenItemIndex = seqIdx
-            elif seqItemType is PhonemeCommand and getattr(seqItem, "text", None):
+            elif isinstance(seqItem, PhonemeCommand) and getattr(seqItem, "text", None):
                 if self._sanitize_speech_text(_normalize_mathematical_alphanumeric(seqItem.text)).strip():
                     lastSpokenItemIndex = seqIdx
 
         def is_trailing_command_at_utterance_end(seqIdx: int) -> bool:
             if seqIdx <= lastSpokenItemIndex:
                 return False
-            return not any(type(rem) is BreakCommand for rem in speechSequence[seqIdx + 1 :])
+            return not any(
+                isinstance(rem, BreakCommand) and max(0, int(getattr(rem, "time", 0) or 0)) > 0
+                for rem in speechSequence[seqIdx + 1 :]
+            )
 
         def append_normalized_text(normalizedItem: str) -> None:
             nonlocal textCharCount, sawIndexSinceLastText
@@ -1228,42 +1265,42 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         for seqIdx, item in enumerate(speechSequence):
             if cancelEvent.is_set():
                 return
-            itemType = type(item)
-            if itemType is str:
+            if isinstance(item, str):
                 append_normalized_text(_normalize_mathematical_alphanumeric(item))
-            elif itemType is BreakCommand:
+            elif isinstance(item, BreakCommand):
+                breakMs = max(0, int(getattr(item, "time", 0) or 0))
+                if breakMs <= 0:
+                    continue
                 yield from flush_text(isUtteranceEnd=False, beforeBreak=True)
                 if cancelEvent.is_set():
                     return
-                breakMs = max(0, int(item.time))
-                if breakMs > 0:
-                    baseBreakRate = (
-                        lastGroupProfileRate
-                        if lastGroupProfileRate is not None
-                        else self._auto_detect_profile_for_text(
-                            "",
-                            activeVoice,
-                            activeLanguage,
-                            voice,
-                            rate,
-                            rateBoost,
-                            pitch,
-                            volume,
-                        )["rate"]
-                    )
-                    effectiveBreakRate = self._apply_prosody_command(baseBreakRate, activeRateCommand)
-                    if effectiveBreakRate >= 0:
-                        breakMs = int(breakMs * _break_rate_factor(effectiveBreakRate))
+                baseBreakRate = (
+                    lastGroupProfileRate
+                    if lastGroupProfileRate is not None
+                    else self._auto_detect_profile_for_text(
+                        "",
+                        activeVoice,
+                        activeLanguage,
+                        voice,
+                        rate,
+                        rateBoost,
+                        pitch,
+                        volume,
+                    )["rate"]
+                )
+                effectiveBreakRate = self._apply_prosody_command(baseBreakRate, activeRateCommand)
+                if effectiveBreakRate >= 0:
+                    breakMs = int(breakMs * _break_rate_factor(effectiveBreakRate))
                 yield ("break", breakMs)
-            elif itemType is CharacterModeCommand:
+            elif isinstance(item, CharacterModeCommand):
                 _inCharMode = bool(item.state)
                 if textParts:
                     sawIndexSinceLastText = True
-            elif itemType is IndexCommand:
+            elif isinstance(item, IndexCommand):
                 pendingIndexes.append((item.index, textCharCount))
                 if textParts:
                     sawIndexSinceLastText = True
-            elif itemType is LangChangeCommand or isinstance(item, language_detector.GoogleTtsProfileLangCommand):
+            elif isinstance(item, (LangChangeCommand, language_detector.GoogleTtsProfileLangCommand)):
                 if not self._auto_language_detection_enabled():
                     continue
                 if isinstance(item, language_detector.GoogleTtsProfileLangCommand):
@@ -1278,7 +1315,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 lastGroupProfileRate = None
                 activeLanguage = googleLanguage if isinstance(googleLanguage, str) else None
                 activeVoice = self._voice_for_language(activeLanguage, voice)
-            elif itemType is PhonemeCommand:
+            elif isinstance(item, PhonemeCommand):
                 # Browser TTS does not support IPA phoneme input.
                 # Fall back to the alternate text if available.
                 if item.text:
@@ -1287,21 +1324,17 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                     append_normalized_text(_normalize_mathematical_alphanumeric(item.text))
                     if textParts:
                         sawIndexSinceLastText = True
-            elif itemType is RateCommand:
+            elif isinstance(item, (RateCommand, PitchCommand, VolumeCommand)):
                 yield from flush_text(isUtteranceEnd=is_trailing_command_at_utterance_end(seqIdx))
                 if cancelEvent.is_set():
                     return
-                activeRateCommand = None if self._is_prosody_reset_command(item) else item
-            elif itemType is PitchCommand:
-                yield from flush_text(isUtteranceEnd=is_trailing_command_at_utterance_end(seqIdx))
-                if cancelEvent.is_set():
-                    return
-                activePitchCommand = None if self._is_prosody_reset_command(item) else item
-            elif itemType is VolumeCommand:
-                yield from flush_text(isUtteranceEnd=is_trailing_command_at_utterance_end(seqIdx))
-                if cancelEvent.is_set():
-                    return
-                activeVolumeCommand = None if self._is_prosody_reset_command(item) else item
+                nextCommand = None if self._is_prosody_reset_command(item) else item
+                if isinstance(item, RateCommand):
+                    activeRateCommand = nextCommand
+                elif isinstance(item, PitchCommand):
+                    activePitchCommand = nextCommand
+                else:
+                    activeVolumeCommand = nextCommand
         yield from flush_text(isUtteranceEnd=True)
 
     def _apply_prosody_command(self, baseValue: Any, command: Any | None) -> int:
@@ -1323,7 +1356,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 elif multiplier != 1:
                     value = audio_math.clamp_int(value * multiplier, value, 0, 100)
             except (TypeError, ValueError, OverflowError):
-                log.debug("Could not apply Google TTS prosody command.", exc_info=True)
+                log.debugWarning("Could not apply Google TTS prosody command.", exc_info=True)
         return max(0, min(100, value))
 
     def _is_prosody_reset_command(self, command: Any) -> bool:
@@ -1450,9 +1483,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 synthDoneSpeaking.notify(synth=self)
             if not cancelEvent.is_set() and not self._shutdownEvent.is_set() and not self._fallbackTriggered:
                 self._consecutiveRuntimeErrors += 1
-                friendlyMessage = str(exc).strip() or _(
-                    "Google TTS For NVDA could not start speech in the Chromium browser runtime."
-                )
+                friendlyMessage = _user_friendly_runtime_error_message(exc)
                 try:
                     runtimeAvailable = ChromeTtsBridge.browser_runtime_available()
                 except Exception:
@@ -1463,6 +1494,41 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         finally:
             if not cancelEvent.is_set():
                 self._maybe_recycle_bridge_after_request()
+
+    def _notify_indexes_immediately(self, indexes: Sequence[Any], cancelEvent: threading.Event) -> None:
+        for index in indexes:
+            if cancelEvent.is_set():
+                return
+            if self._isPaused:
+                self._sync_player()
+            if not cancelEvent.is_set():
+                synthIndexReached.notify(synth=self, index=index)
+
+    def _play_cached_audio(
+        self,
+        cached: bytes,
+        remainingIndexes: list[_IndexMarker],
+        totalCharacters: int,
+        hasInternalIndexes: bool,
+        cancelEvent: threading.Event,
+        checkpoints: tuple[tuple[int, int], ...] | None = None,
+    ) -> None:
+        if cancelEvent.is_set():
+            return
+        if hasInternalIndexes:
+            self._feed_audio_with_indexes(
+                cached,
+                remainingIndexes,
+                totalCharacters,
+                cancelEvent,
+                checkpoints=checkpoints,
+            )
+            return
+        if remainingIndexes:
+            dispatcher = _SyncedIndexDispatcher(self, cancelEvent)
+            dispatcher.feed(cached, [index for index, _charOffset in remainingIndexes])
+        else:
+            self._feed_audio(cached)
 
     def _speak_text(
         self,
@@ -1485,13 +1551,9 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         indexes = indexes or []
         leadingIndexes = [index for index, charOffset in indexes if charOffset <= 0]
         remainingIndexes = [(index, charOffset) for index, charOffset in indexes if charOffset > 0]
-        for index in leadingIndexes:
-            if cancelEvent.is_set():
-                return
-            if self._isPaused:
-                self._sync_player()
-            if not cancelEvent.is_set():
-                synthIndexReached.notify(synth=self, index=index)
+        self._notify_indexes_immediately(leadingIndexes, cancelEvent)
+        if cancelEvent.is_set():
+            return
 
         hasInternalIndexes = any(0 < charOffset < len(originalText) for _index, charOffset in remainingIndexes)
         cacheKey = self._short_cache_key(
@@ -1509,93 +1571,94 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                     pauseShorteningMode,
                     hasPreviousSegment=segmentIndex > 0,
                     hasNextSegment=segmentIndex < len(originalHiddenSegments) - 1,
+                    trimLeadingSilence=(
+                        segmentIndex > 0
+                        and (
+                            pauseShorteningMode == _PAUSE_MODE_SHORTEN_ALL
+                            or not self._ends_with_pause_punctuation(originalHiddenSegments[segmentIndex - 1])
+                        )
+                    ),
                 )
                 for segmentIndex, segment in enumerate(originalHiddenSegments)
             ]
-        log.debug(
-            "Google TTS speech group: chars=%d, hiddenSegments=%d, firstHiddenChars=%d, "
-            "wholeCacheEligible=%s, pauseMode=%s.",
-            len(originalText),
-            len(originalHiddenSegments),
-            len(originalHiddenSegments[0]) if originalHiddenSegments else len(originalText),
-            cacheKey is not None,
-            pauseShorteningMode,
-        )
+        debugSynth = _is_debug_for_synth_driver()
+        if debugSynth:
+            log.debug(
+                "Google TTS speech group: chars=%d, hiddenSegments=%d, firstHiddenChars=%d, "
+                "wholeCacheEligible=%s, pauseMode=%s.",
+                len(originalText),
+                len(originalHiddenSegments),
+                len(originalHiddenSegments[0]) if originalHiddenSegments else len(originalText),
+                cacheKey is not None,
+                pauseShorteningMode,
+            )
         if cacheKey is not None:
             cached = self._get_cached_audio(cacheKey)
             if cached is not None:
-                log.debug(
-                    "Google TTS short audio cache hit: kind=group, chars=%d, bytes=%d.",
+                if debugSynth:
+                    log.debug(
+                        "Google TTS short audio cache hit: kind=group, chars=%d, bytes=%d.",
+                        len(originalText),
+                        len(cached),
+                    )
+                self._play_cached_audio(
+                    cached,
+                    remainingIndexes,
                     len(originalText),
-                    len(cached),
+                    hasInternalIndexes,
+                    cancelEvent,
+                    checkpoints=self._get_cached_timepoints(cacheKey),
                 )
-                if not cancelEvent.is_set():
-                    if hasInternalIndexes:
-                        self._feed_audio_with_indexes(
-                            cached,
-                            remainingIndexes,
-                            len(originalText),
-                            cancelEvent,
-                            checkpoints=self._get_cached_timepoints(cacheKey),
-                        )
-                    else:
-                        self._feed_audio(cached)
-                        for index, _charOffset in remainingIndexes:
-                            if cancelEvent.is_set():
-                                return
-                            if self._isPaused:
-                                self._sync_player()
-                            if not cancelEvent.is_set():
-                                synthIndexReached.notify(synth=self, index=index)
                 return
-            log.debug("Google TTS short audio cache miss: kind=group, chars=%d.", len(originalText))
+            if debugSynth:
+                log.debug("Google TTS short audio cache miss: kind=group, chars=%d.", len(originalText))
 
         cachedSegmentAudio: list[bytes] = []
         cachedSegmentCount = 0
         for segmentIndex, segmentKey in enumerate(segmentCacheKeys):
             if segmentKey is None:
-                log.debug(
-                    "Google TTS segment cache disabled: index=%d, chars=%d.",
-                    segmentIndex,
-                    len(originalHiddenSegments[segmentIndex]),
-                )
+                if debugSynth:
+                    log.debug(
+                        "Google TTS segment cache disabled: index=%d, chars=%d.",
+                        segmentIndex,
+                        len(originalHiddenSegments[segmentIndex]),
+                    )
                 break
             segmentAudio = self._get_cached_audio(segmentKey)
             if segmentAudio is None:
+                if debugSynth:
+                    log.debug(
+                        "Google TTS short audio cache miss: kind=segment, index=%d, chars=%d.",
+                        segmentIndex,
+                        len(originalHiddenSegments[segmentIndex]),
+                    )
+                break
+            if debugSynth:
                 log.debug(
-                    "Google TTS short audio cache miss: kind=segment, index=%d, chars=%d.",
+                    "Google TTS short audio cache hit: kind=segment, index=%d, chars=%d, bytes=%d.",
                     segmentIndex,
                     len(originalHiddenSegments[segmentIndex]),
+                    len(segmentAudio),
                 )
-                break
-            log.debug(
-                "Google TTS short audio cache hit: kind=segment, index=%d, chars=%d, bytes=%d.",
-                segmentIndex,
-                len(originalHiddenSegments[segmentIndex]),
-                len(segmentAudio),
-            )
             cachedSegmentAudio.append(segmentAudio)
             cachedSegmentCount += 1
 
         if segmentCacheKeys and cachedSegmentCount == len(segmentCacheKeys):
             cached = b"".join(cachedSegmentAudio)
-            log.debug(
-                "Google TTS segment cache satisfied group: segments=%d, chars=%d, bytes=%d.",
-                cachedSegmentCount,
+            if debugSynth:
+                log.debug(
+                    "Google TTS segment cache satisfied group: segments=%d, chars=%d, bytes=%d.",
+                    cachedSegmentCount,
+                    len(originalText),
+                    len(cached),
+                )
+            self._play_cached_audio(
+                cached,
+                remainingIndexes,
                 len(originalText),
-                len(cached),
+                hasInternalIndexes,
+                cancelEvent,
             )
-            if hasInternalIndexes:
-                self._feed_audio_with_indexes(cached, remainingIndexes, len(originalText), cancelEvent)
-            elif not cancelEvent.is_set():
-                self._feed_audio(cached)
-                for index, _charOffset in remainingIndexes:
-                    if cancelEvent.is_set():
-                        return
-                    if self._isPaused:
-                        self._sync_player()
-                    if not cancelEvent.is_set():
-                        synthIndexReached.notify(synth=self, index=index)
             if cacheKey is not None and not cancelEvent.is_set():
                 self._put_cached_audio(cacheKey, cached)
             return
@@ -1632,13 +1695,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             text = originalText
             bridgeSegments = originalHiddenSegments or None
         if not text:
-            for index, _charOffset in remainingIndexes:
-                if cancelEvent.is_set():
-                    return
-                if self._isPaused:
-                    self._sync_player()
-                if not cancelEvent.is_set():
-                    synthIndexReached.notify(synth=self, index=index)
+            self._notify_indexes_immediately([index for index, _charOffset in remainingIndexes], cancelEvent)
             return
 
         audioParts: list[bytes] = [cachedPrefixAudio] if cacheKey is not None and cachedPrefixAudio else []
@@ -1649,9 +1706,14 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         hasUnpunctuatedHiddenBoundary = len(synthesisSegments) > 1 and any(
             not self._ends_with_pause_punctuation(seg) for seg in synthesisSegments[:-1]
         )
+        trimInitialLeadingSilence = cachedSegmentCount > 0 and (
+            pauseShorteningMode == _PAUSE_MODE_SHORTEN_ALL
+            or not self._ends_with_pause_punctuation(originalHiddenSegments[cachedSegmentCount - 1])
+        )
         effectiveShortenerMode = (
             _PAUSE_MODE_SHORTEN_END_ONLY
-            if pauseShorteningMode == _PAUSE_MODE_DO_NOT_SHORTEN and hasUnpunctuatedHiddenBoundary
+            if pauseShorteningMode == _PAUSE_MODE_DO_NOT_SHORTEN
+            and (hasUnpunctuatedHiddenBoundary or trimInitialLeadingSilence)
             else pauseShorteningMode
         )
         packageId = ""
@@ -1670,13 +1732,14 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             keepSilenceMs,
             noiseFloor=noiseFloor,
             minPauseTriggerMs=minPauseTriggerMs,
+            trimLeadingSilence=trimInitialLeadingSilence,
         )
         leadBuffer = (
             PcmLeadBuffer(sampleRate=SAMPLE_RATE, leadMs=LIVE_MULTI_SEGMENT_LEAD_MS)
             if len(synthesisSegments) > 1 and not cachedPrefixAudio
             else None
         )
-        if leadBuffer is not None:
+        if leadBuffer is not None and debugSynth:
             log.debug(
                 "Google TTS live PCM lead buffer enabled: milliseconds=%d, segments=%d.",
                 LIVE_MULTI_SEGMENT_LEAD_MS,
@@ -1688,11 +1751,15 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         completedSegmentChars = 0
         dispatcher = _SyncedIndexDispatcher(self, cancelEvent)
         rawSamplesReceived = 0
-        postShortenBytesFed = 0
+        postShortenBytesFed = len(cachedPrefixAudio)
         scheduledSampleIndexes: list[tuple[int, int, Any]] = []
         markTieSeq = 0
         pendingCheckpoints: list[tuple[int, int]] = []
-        timepointCheckpoints: list[tuple[int, int]] = []
+        timepointCheckpoints: list[tuple[int, int]] = (
+            [(cachedPrefixCharacters, len(cachedPrefixAudio))]
+            if cacheKey is not None and cachedPrefixAudio and cachedPrefixCharacters > 0
+            else []
+        )
         eventQueue: queue.SimpleQueue[tuple[str, Any]] = queue.SimpleQueue()
         consumerErrors: list[BaseException] = []
 
@@ -1830,10 +1897,11 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             clampedOffset = max(0, min(len(text), charOffset))
             clampedSample = max(0, int(sampleOffset))
             if cacheKey is not None:
+                fullCharOffset = cachedPrefixCharacters + clampedOffset
                 if clampedSample <= rawSamplesReceived:
-                    record_checkpoint(clampedOffset, postShortenBytesFed)
+                    record_checkpoint(fullCharOffset, postShortenBytesFed)
                 else:
-                    bisect.insort(pendingCheckpoints, (clampedSample, clampedOffset))
+                    bisect.insort(pendingCheckpoints, (clampedSample, fullCharOffset))
             readyNow: list[Any] = []
             while pendingIndexes and pendingIndexes[0][1] <= clampedOffset:
                 index, _indexOffset = pendingIndexes.pop(0)
@@ -1863,6 +1931,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 feed_processed_audio(
                     silenceShortener.flush_boundary(
                         shortenPause=shortenBoundary,
+                        trimNextLeadingSilence=shortenBoundary,
                     )
                 )
             if pendingIndexes and not cancelEvent.is_set():
@@ -1981,7 +2050,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             and not cancelEvent.is_set()
             and not speechComplete
         ):
-            log.debug(
+            log.debugWarning(
                 "Google TTS speech completion rejected: expectedSegmentEnds=%d, actualSegmentEnds=%r.",
                 expectedSegmentEnds,
                 speechResult.get("segmentEnds"),
@@ -1989,7 +2058,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         if speechComplete and segmentCacheKeys:
             expectedSegmentCount = len(synthesisSegments)
             if len(completedSegmentAudio) != expectedSegmentCount:
-                log.debug(
+                log.debugWarning(
                     "Google TTS segment cache skipped after boundary mismatch: expected=%d, actual=%d.",
                     expectedSegmentCount,
                     len(completedSegmentAudio),
@@ -2000,12 +2069,13 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                     segmentKey = segmentCacheKeys[segmentIndex]
                     if segmentKey is not None and len(segmentAudio) >= 64 and _pcm_has_audible_sample(segmentAudio):
                         self._put_cached_audio(segmentKey, segmentAudio)
-                        log.debug(
-                            "Google TTS short audio cache stored: kind=segment, index=%d, chars=%d, bytes=%d.",
-                            segmentIndex,
-                            len(originalHiddenSegments[segmentIndex]),
-                            len(segmentAudio),
-                        )
+                        if debugSynth:
+                            log.debug(
+                                "Google TTS short audio cache stored: kind=segment, index=%d, chars=%d, bytes=%d.",
+                                segmentIndex,
+                                len(originalHiddenSegments[segmentIndex]),
+                                len(segmentAudio),
+                            )
         if (
             cacheKey is not None
             and speechComplete
@@ -2018,11 +2088,12 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 audio,
                 checkpoints=tuple(timepointCheckpoints) if timepointCheckpoints else None,
             )
-            log.debug(
-                "Google TTS short audio cache stored: kind=group, chars=%d, bytes=%d.",
-                len(originalText),
-                len(audio),
-            )
+            if debugSynth:
+                log.debug(
+                    "Google TTS short audio cache stored: kind=group, chars=%d, bytes=%d.",
+                    len(originalText),
+                    len(audio),
+                )
 
     def _active_cancel_set(self) -> bool:
         cancelEvent = getattr(self, "_activeCancelEvent", None)
@@ -2086,7 +2157,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                     if isSilence
                     else "WavePlayer.feed failed; recreating WavePlayer and retrying."
                 )
-                log.debug(label, exc_info=True)
+                log.debugWarning(label, exc_info=True)
                 self._recreate_wave_player()
                 if self._is_shutting_down() or self._active_cancel_set():
                     return False
@@ -2098,7 +2169,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                         call_feed(retryPlayer)
                         return True
                     except Exception:
-                        log.debug(
+                        log.debugWarning(
                             "WavePlayer.feed retry failed during silence."
                             if isSilence
                             else "WavePlayer.feed retry failed.",
@@ -2139,7 +2210,10 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 return
             chunk = pcm[position:byteOffset]
             position = byteOffset
-            dispatcher.feed(chunk, dueIndexes)
+            if not chunk and byteOffset == 0 and not dispatcher._hasFedAudio:
+                dispatcher.notify_after_previous_audio(dueIndexes, deferIfEmpty=False)
+            else:
+                dispatcher.feed(chunk, dueIndexes)
         if not cancelEvent.is_set() and position < totalBytes:
             dispatcher.feed(pcm[position:])
 
@@ -2163,7 +2237,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             except Exception:
                 if self._is_shutting_down() or self._active_cancel_set():
                     return
-                log.debug(failureMessage, exc_info=True)
+                log.debugWarning(failureMessage, exc_info=True)
                 self._recreate_wave_player()
 
     def _sync_player(self) -> None:
@@ -2183,7 +2257,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         try:
             recycled = self._bridge.maybe_recycle_runtime(allowIdleRecycle=queueIdle)
         except Exception:
-            log.debug("Could not recycle Google TTS Chromium runtime.", exc_info=True)
+            log.debugWarning("Could not recycle Google TTS Chromium runtime.", exc_info=True)
             return
         if not recycled:
             return
@@ -2219,6 +2293,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         *,
         hasPreviousSegment: bool,
         hasNextSegment: bool,
+        trimLeadingSilence: bool = False,
     ) -> tuple[Any, ...] | None:
         return segment_audio_cache_key(
             text,
@@ -2226,6 +2301,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             pauseShorteningMode,
             hasPreviousSegment=hasPreviousSegment,
             hasNextSegment=hasNextSegment,
+            trimLeadingSilence=trimLeadingSilence,
         )
 
     def _get_cached_audio(self, key: tuple[Any, ...]) -> bytes | None:
@@ -2285,6 +2361,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 self._shortAudioCacheEvictions != evictionsBefore
                 and self._shortAudioCacheEvictions
                 and self._shortAudioCacheEvictions % _SHORT_CACHE_STATS_LOG_INTERVAL == 0
+                and _is_debug_for_synth_driver()
             ):
                 log.debug(
                     "Google TTS short audio cache stats: items=%d, bytes=%d, hits=%d, misses=%d, evictions=%d",
@@ -2302,14 +2379,15 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         tpCache = getattr(self, "_shortAudioTimepointsCache", None)
         with cacheLock:
             if self._shortAudioCache:
-                log.debug(
-                    "Clearing Google TTS short audio cache: items=%d, bytes=%d, hits=%d, misses=%d, evictions=%d",
-                    len(self._shortAudioCache),
-                    self._shortAudioCacheBytes,
-                    getattr(self, "_shortAudioCacheHits", 0),
-                    getattr(self, "_shortAudioCacheMisses", 0),
-                    getattr(self, "_shortAudioCacheEvictions", 0),
-                )
+                if _is_debug_for_synth_driver():
+                    log.debug(
+                        "Clearing Google TTS short audio cache: items=%d, bytes=%d, hits=%d, misses=%d, evictions=%d",
+                        len(self._shortAudioCache),
+                        self._shortAudioCacheBytes,
+                        getattr(self, "_shortAudioCacheHits", 0),
+                        getattr(self, "_shortAudioCacheMisses", 0),
+                        getattr(self, "_shortAudioCacheEvictions", 0),
+                    )
             self._shortAudioCache.clear()
             if tpCache is not None:
                 tpCache.clear()
@@ -2357,52 +2435,31 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         candidateLanguages = self._auto_language_candidates()
         if not candidateLanguages:
             return self._speech_profile(activeVoice, rate, rateBoost, pitch, volume)
+        targetLanguage: str | None = None
         if activeLanguage:
-            profileLanguage = self._auto_language_candidate_for_language(activeLanguage, candidateLanguages)
-            if profileLanguage:
-                return self._auto_language_profile(
-                    profileLanguage,
-                    activeVoice,
-                    rate,
-                    rateBoost,
-                    pitch,
-                    volume,
-                )
-            return self._speech_profile(activeVoice, rate, rateBoost, pitch, volume)
-        if activeVoice != baseVoice:
+            targetLanguage = self._auto_language_candidate_for_language(activeLanguage, candidateLanguages) or None
+            if not targetLanguage:
+                return self._speech_profile(activeVoice, rate, rateBoost, pitch, volume)
+        elif activeVoice != baseVoice:
             with self._catalog_lock():
                 try:
                     voiceLanguage = self.catalog.language_for_voice(activeVoice)
                 except KeyError:
                     voiceLanguage = ""
-            profileLanguage = (
+            targetLanguage = (
                 self._auto_language_candidate_for_language(voiceLanguage, candidateLanguages) if voiceLanguage else ""
+            ) or None
+            if not targetLanguage:
+                return self._speech_profile(activeVoice, rate, rateBoost, pitch, volume)
+        elif len(candidateLanguages) == 1:
+            targetLanguage = candidateLanguages[0]
+        else:
+            preferredLanguage = self._auto_language_preferred(candidateLanguages, activeVoice)
+            targetLanguage = (
+                self._detect_auto_language(text, candidateLanguages, preferredLanguage) or preferredLanguage
             )
-            if profileLanguage:
-                return self._auto_language_profile(
-                    profileLanguage,
-                    activeVoice,
-                    rate,
-                    rateBoost,
-                    pitch,
-                    volume,
-                )
-            return self._speech_profile(activeVoice, rate, rateBoost, pitch, volume)
-        if len(candidateLanguages) == 1:
-            return self._auto_language_profile(
-                candidateLanguages[0],
-                activeVoice,
-                rate,
-                rateBoost,
-                pitch,
-                volume,
-            )
-        preferredLanguage = self._auto_language_preferred(candidateLanguages, activeVoice)
-        detectedLanguage = self._detect_auto_language(text, candidateLanguages, preferredLanguage)
-        if detectedLanguage is None:
-            detectedLanguage = preferredLanguage
         return self._auto_language_profile(
-            detectedLanguage,
+            targetLanguage,
             activeVoice,
             rate,
             rateBoost,
@@ -2448,7 +2505,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         )
 
     def _voice_matches_language(self, voice: str, language: str | None) -> bool:
-        return standby._voice_matches_language(self.catalog, voice, language)
+        with self._catalog_lock():
+            return standby._voice_matches_language(self.catalog, voice, language)
 
     def _auto_language_notice_message(self) -> str:
         return _(
@@ -2516,6 +2574,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         if not _has_language_words(text):
             return None
         candidateByRoot: dict[str, str] = {}
+        if preferredLanguage and preferredLanguage in candidateLanguages:
+            candidateByRoot[self._language_root(preferredLanguage)] = preferredLanguage
         for language in candidateLanguages:
             candidateByRoot.setdefault(self._language_root(language), language)
         scores = {root: 0 for root in candidateByRoot}
@@ -2709,7 +2769,9 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                     with self._catalog_lock():
                         packageId = self.catalog.package_for_voice(warmupVoiceId).id
                 except Exception:
-                    log.debug("Could not resolve Google TTS preload package for %s.", warmupVoiceId, exc_info=True)
+                    log.debugWarning(
+                        "Could not resolve Google TTS preload package for %s.", warmupVoiceId, exc_info=True
+                    )
                     continue
                 if packageId in seenPackages:
                     continue
@@ -2734,7 +2796,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 speaker = self.catalog.speaker_for_voice(voiceId)
                 package = self.catalog.package_for_voice(voiceId)
         except Exception:
-            log.debug("Could not resolve Google TTS preload voice %s.", voiceId, exc_info=True)
+            log.debugWarning("Could not resolve Google TTS preload voice %s.", voiceId, exc_info=True)
             return []
         if package.id in seenPackages:
             return []
@@ -2758,7 +2820,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             try:
                 optionsList.append(self._speech_options(self._rate, self._pitch, 0, voiceId, self._rateBoost))
             except Exception:
-                log.debug("Could not prepare Google TTS preload options for %s.", voiceId, exc_info=True)
+                log.debugWarning("Could not prepare Google TTS preload options for %s.", voiceId, exc_info=True)
         return optionsList
 
     def _warm_current_voice_async(self, delay: float = 0.0) -> None:
@@ -2788,7 +2850,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                         log.debug("Google TTS voice preload cancelled.")
                         return False
                     except Exception:
-                        log.debug("Google TTS voice preload failed.", exc_info=True)
+                        log.debugWarning("Google TTS voice preload failed.", exc_info=True)
                 return True
 
             def warm() -> None:
@@ -2801,7 +2863,11 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                         log.debug("Google TTS bridge eager connection cancelled.")
                         return
                     except Exception as exc:
-                        log.debug("Google TTS bridge eager connection failed.", exc_info=True)
+                        detail = str(getattr(exc, "technicalDetail", "") or "")
+                        if detail:
+                            log.debugWarning("Google TTS bridge eager connection failed: %s", detail, exc_info=True)
+                        else:
+                            log.debugWarning("Google TTS bridge eager connection failed.", exc_info=True)
                         if (
                             not cancelEvent.is_set()
                             and not self._shutdownEvent.is_set()
@@ -2812,10 +2878,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                             except Exception:
                                 runtimeAvailable = False
                             if not runtimeAvailable:
-                                friendlyMessage = str(exc).strip() or _(
-                                    "Google TTS For NVDA could not start speech in the Chromium browser runtime."
-                                )
-                                self._trigger_fatal_fallback_async(friendlyMessage)
+                                self._trigger_fatal_fallback_async(_user_friendly_runtime_error_message(exc))
                         return
                     if cancelEvent.is_set() or self._shutdownEvent.is_set():
                         return

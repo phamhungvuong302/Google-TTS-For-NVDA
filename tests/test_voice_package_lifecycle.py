@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from tests.test_support import FakeHttpResponse, load_driver_module
+from tests.test_support import FakeHttpResponse, load_driver_module, make_test_voice_package
 
 voice_store = load_driver_module("voice_store")
 catalog_module = load_driver_module("catalog")
@@ -355,16 +355,24 @@ class PackageDownloadGuardTests(unittest.TestCase):
         """Insecure download links are refused before any network access."""
         with _isolated_voice_store():
             pkg = _FakePackage(url="http://example.com/fake.zvoice")
-            with self.assertRaises(RuntimeError) as context:
+            with (
+                patch.object(voice_store, "_", side_effect=lambda text: f"[TR] {text}", create=True),
+                self.assertRaises(voice_store.VoicePackageError) as context,
+            ):
                 voice_store.download_package(pkg)
             self.assertIn("HTTPS", str(context.exception))
+            self.assertTrue(str(context.exception).startswith("[TR] "))
 
     def test_https_redirect_handler_blocks_downgrade_to_http(self) -> None:
         req = voice_store.urllib.request.Request("https://example.com/voice.zvoice")
         handler = voice_store._HttpsOnlyRedirectHandler()
-        with self.assertRaises(RuntimeError) as context:
+        with (
+            patch.object(voice_store, "_", side_effect=lambda text: f"[TR] {text}", create=True),
+            self.assertRaises(voice_store.VoicePackageError) as context,
+        ):
             handler.redirect_request(req, None, 302, "Found", {}, "http://example.com/voice.zvoice")
         self.assertIn("HTTPS", str(context.exception))
+        self.assertTrue(str(context.exception).startswith("[TR] "))
 
         https_req = handler.redirect_request(req, None, 302, "Found", {}, "https://cdn.example.com/voice.zvoice")
         self.assertIsNotNone(https_req)
@@ -374,9 +382,13 @@ class PackageDownloadGuardTests(unittest.TestCase):
         """A package whose catalog size exceeds the limit is refused before downloading."""
         with _isolated_voice_store():
             pkg = _FakePackage(compressed_size=voice_store.VOICE_PACKAGE_MAX_BYTES + 1)
-            with self.assertRaises(RuntimeError) as context:
+            with (
+                patch.object(voice_store, "_", side_effect=lambda text: f"[TR] {text}", create=True),
+                self.assertRaises(voice_store.VoicePackageError) as context,
+            ):
                 voice_store.download_package(pkg)
             self.assertIn("larger", str(context.exception))
+            self.assertTrue(str(context.exception).startswith("[TR] "))
 
     def test_rejects_response_larger_than_limit(self) -> None:
         """A Content-Length above the limit aborts the download and removes the partial file."""
@@ -498,25 +510,7 @@ class VoicePackageLifecycleTests(unittest.TestCase):
 
 
 class CatalogValidationTests(unittest.TestCase):
-    @staticmethod
-    def _catalog_package(
-        package_id: str = "en-us-x-sfg",
-        *,
-        file_id: str = "f1",
-        url: str = "https://example.com/en.zvoice",
-        sha256: str = "a" * 64,
-        compressed_size: int = 100,
-        speakers: tuple[dict[str, Any], ...] = ({"id": "en-1", "speaker": "s1", "language": "en-US"},),
-    ) -> Any:
-        return catalog_module.VoicePackage(
-            id=package_id,
-            fileId=file_id,
-            url=url,
-            sha256Checksum=sha256,
-            compressedSize=compressed_size,
-            remote=False,
-            speakers=speakers,
-        )
+    _catalog_package = staticmethod(make_test_voice_package)
 
     def test_valid_multiple_packages(self) -> None:
         pkg1 = self._catalog_package()
