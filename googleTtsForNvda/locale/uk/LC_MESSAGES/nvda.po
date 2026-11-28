@@ -3,14 +3,14 @@ msgstr ""
 "Project-Id-Version: Google TTS для NVDA 1.1\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"PO-Revision-Date: 2026-08-15 23:11+0300\n"
+"PO-Revision-Date: 2026-11-28 09:45+0200\n"
 "Last-Translator: Volodymyr Pyrih <vp88.mobile@gmail.com>\n"
 "Language-Team: \n"
 "Language: uk\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"X-Generator: Poedit 3.9\n"
+"X-Generator: Poedit 3.10\n"
 "X-Poedit-Basepath: ../../..\n"
 "X-Poedit-SearchPath-0: globalPlugins\n"
 "X-Poedit-SearchPath-1: synthDrivers\n"
@@ -35,7 +35,7 @@ msgstr "&Копіювати посилання"
 
 #: globalPlugins/googleTtsForNvda/settings.py:445
 msgid "&Donate..."
-msgstr ""
+msgstr "&Пожертвувати..."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:212
 msgid "&Download checked voice packages"
@@ -89,7 +89,7 @@ msgstr "&Використовувати цей мовний профіль"
 
 #: globalPlugins/googleTtsForNvda/uiUtils.py:643
 msgid "&View payment methods"
-msgstr ""
+msgstr "&Переглянути способи оплати"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1351
 msgid ""
@@ -235,7 +235,7 @@ msgstr "Каталонська"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:163
 msgid "Check &all voice packages"
-msgstr "Позначети всі голосові пакети"
+msgstr "Позначити всі голосові пакети"
 
 #: globalPlugins/googleTtsForNvda/updateGui.py:362
 msgid "Checking for Google TTS For NVDA updates..."
@@ -362,7 +362,7 @@ msgstr "Догрі"
 
 #: globalPlugins/googleTtsForNvda/uiUtils.py:632
 msgid "Donate to Google TTS For NVDA"
-msgstr ""
+msgstr "Зробіть пожертву для підтримки Google TTS для NVDA"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:110
 msgid "Download"
@@ -650,6 +650,17 @@ msgid ""
 "View payment methods to see bank transfer details for Vietnam, the US, and "
 "international SWIFT on GitHub."
 msgstr ""
+"Google TTS For NVDA — це безкоштовне програмне забезпечення з відкритим "
+"кодом, і пожертви є повністю добровільними.\n"
+"\n"
+"Пожертви надходять до розробника для підтримки подальшої розробки, оновлень "
+"сумісності та випуску нових версій. Під час здійснення переказу, будь ласка, "
+"вкажіть примітку «{memo}», щоб його було легко ідентифікувати.\n"
+"\n"
+"Виберіть «Відкрити посилання PayPal», щоб зробити пожертву через PayPal у "
+"вашому браузері. Виберіть «Переглянути способи оплати», щоб переглянути "
+"реквізити для банківських переказів у В’єтнамі, США та міжнародних переказів "
+"через SWIFT на GitHub."
 
 #: synthDrivers/googleTtsForNvda/bridge.py:2279
 msgid "Google TTS For NVDA is not connected to the Chromium browser runtime."
@@ -1048,7 +1059,7 @@ msgstr ""
 
 #: globalPlugins/googleTtsForNvda/uiUtils.py:642
 msgid "Open &PayPal link"
-msgstr ""
+msgstr "Відкрити посилання PayPal"
 
 #: globalPlugins/googleTtsForNvda/__init__.py:2439
 msgid "Opens the Google TTS For NVDA settings."
@@ -1064,11 +1075,11 @@ msgstr "Пакет"
 
 #: globalPlugins/googleTtsForNvda/uiUtils.py:661
 msgid "Payment methods address"
-msgstr ""
+msgstr "Адреса способів оплати"
 
 #: globalPlugins/googleTtsForNvda/uiUtils.py:653
 msgid "PayPal address"
-msgstr ""
+msgstr "Адреса PayPal"
 
 #: synthDrivers/googleTtsForNvda/language_utils.py:93
 msgid "Polish"
@@ -1237,7 +1248,7 @@ msgstr "Суданська"
 
 #: globalPlugins/googleTtsForNvda/settings.py:444
 msgid "Support the add-on"
-msgstr ""
+msgstr "Підтримайте цей додаток"
 
 #: synthDrivers/googleTtsForNvda/language_utils.py:108
 msgid "Swahili"
@@ -1360,11 +1371,15 @@ msgid ""
 "The payment methods page could not be opened. Please visit this address "
 "manually:"
 msgstr ""
+"Не вдалося відкрити сторінку способів оплати. Будь ласка, перейдіть за цією "
+"адресою вручну:"
 
 #: globalPlugins/googleTtsForNvda/uiUtils.py:652
 msgid ""
 "The PayPal link could not be opened. Please visit this address manually:"
 msgstr ""
+"Не вдалося відкрити посилання PayPal. Будь ласка, перейдіть за цією адресою "
+"вручну:"
 
 #: globalPlugins/googleTtsForNvda/uiUtils.py:400
 msgid "The Select Synthesizer dialog could not be opened."
@@ -1489,6 +1504,26 @@ msgid ""
 "- Upgraded the bundled WASM TTS engine to version 20261110.1 and websocket-"
 "client to 1.10.0, and updated translations."
 msgstr ""
+"Версія 1.1:\n"
+"- Синхронізовано перебіг мовлення з відтворенням аудіо для більш точного "
+"відстеження та переривання функції «Прочитати все», а також зроблено читання "
+"кількох речень та скорочення пауз більш плавним і чітким.\n"
+"- Покращено якість високошвидкісного мовлення та висоти тону для голосів "
+"SeaNet і Lemonbalm, увімкнено 8 додаткових пакетів голосів Lemonbalm "
+"(загалом 168 доступних пакетів) та уніфіковано назви локалізованих мов і їх "
+"сортування в NVDA.\n"
+"- Оновлено обробку багатомовного тексту до Unicode 18.0 та CLDR 49 для "
+"точнішої підтримки розділових знаків, емодзі, систем письма та автоматичних "
+"мовних профілів.\n"
+"- Посилено безпеку шляхом блокування зовнішніх веб-джерел від локальної "
+"комунікації з браузером та запровадження суворіших перевірок HTTPS і "
+"завантажень для голосових пакетів та оновлень додатків.\n"
+"- Покращено стабільність відтворення аудіо та роботи браузера (включно з "
+"обходом системних проксі-серверів для локального відтворення мовлення), "
+"оновлено сумісність із NVDA 2027.1 та додано кнопку «Пожертвувати...» у "
+"налаштуваннях додатка.\n"
+"- Оновлено вбудований механізм WASM TTS до версії 20261110.1 та websocket-"
+"client до 1.10.0, а також оновлено переклади."
 
 #: synthDrivers/googleTtsForNvda/language_utils.py:116
 msgid "Vietnamese"
@@ -1519,6 +1554,8 @@ msgstr ""
 #: synthDrivers/googleTtsForNvda/voice_store.py:73
 msgid "Voice package downloads must remain on a secure HTTPS connection."
 msgstr ""
+"Завантаження голосових пакетів має відбуватися через захищене HTTPS-"
+"з’єднання."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1366
 msgid "Voice package operation failed: {message}"
@@ -1538,12 +1575,14 @@ msgstr "Голосовий пакет {package} не пройшов переві
 
 #: synthDrivers/googleTtsForNvda/voice_store.py:63
 msgid "Voice package {package} is larger than the supported download limit."
-msgstr ""
+msgstr "Розмір голосового пакета {package} перевищує ліміт завантаження."
 
 #: synthDrivers/googleTtsForNvda/voice_store.py:57
 msgid ""
 "Voice package {package} must be downloaded over a secure HTTPS connection."
 msgstr ""
+"Голосовий пакет {package} потрібно завантажити через захищене HTTPS-"
+"з’єднання."
 
 #: synthDrivers/googleTtsForNvda/__init__.py:2512
 msgid ""
