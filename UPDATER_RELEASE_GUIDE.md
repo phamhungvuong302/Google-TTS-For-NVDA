@@ -151,7 +151,7 @@ stable.json
 The release must be the latest stable release because the updater checks:
 
 ```text
-https://github.com/nguyenanhduc09/Google-TTS-For-NVDA/releases/latest/download/stable.json
+https://github.com/phamhungvuong302/Google-TTS-For-NVDA/releases/latest/download/stable.json
 ```
 
 Do not use a draft release for a version that should be visible to the updater.
@@ -167,8 +167,8 @@ temporarily instead of installing the wrong package.
 After uploading the release assets, verify these links:
 
 ```text
-https://github.com/nguyenanhduc09/Google-TTS-For-NVDA/releases/latest/download/stable.json
-https://github.com/nguyenanhduc09/Google-TTS-For-NVDA/releases/download/v<version>/googleTtsForNvda-<version>.nvda-addon
+https://github.com/phamhungvuong302/Google-TTS-For-NVDA/releases/latest/download/stable.json
+https://github.com/phamhungvuong302/Google-TTS-For-NVDA/releases/download/v<version>/googleTtsForNvda-<version>.nvda-addon
 ```
 
 Check that `stable.json` contains the correct:
@@ -200,7 +200,7 @@ manifest.ini: version = <version>
 buildInfo.json: baseVersion = <version>, updateBuild = 2
 package: googleTtsForNvda-<version>.nvda-addon
 tag: v<version>
-url: https://github.com/nguyenanhduc09/Google-TTS-For-NVDA/releases/download/v<version>/googleTtsForNvda-<version>.nvda-addon
+url: https://github.com/phamhungvuong302/Google-TTS-For-NVDA/releases/download/v<version>/googleTtsForNvda-<version>.nvda-addon
 ```
 
 When moving to a new version (for example, incrementing from `<version>` to `<new_version>`), update `manifest.ini` to `<new_version>`, set `buildInfo.json` to `baseVersion: "<new_version>"` and `updateBuild: 1`, build `googleTtsForNvda-<new_version>.nvda-addon`, and publish it under tag `v<new_version>`.

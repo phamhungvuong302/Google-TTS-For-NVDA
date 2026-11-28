@@ -4,7 +4,7 @@
 
 For a long time, screen reader users have wished they could use familiar voices from Google's text-to-speech technology on NVDA for Windows, similar to the experience on Android screen readers. Google TTS For NVDA fulfills that wish, delivering responsive, natural speech to enhance daily accessibility. Once your desired voice packages are downloaded, the add-on operates entirely offline on your computer.
 
-*This add-on is co-developed by [Nguyễn Anh Đức](https://github.com/nguyenanhduc09), [Đào Đức Trung](https://github.com/daoductrung) and [Phạm Hùng Vương](https://github.com/phamhungvuong302).*
+*Originally created by [Nguyễn Anh Đức](https://github.com/nguyenanhduc09) and [Đào Đức Trung](https://github.com/daoductrung); now maintained and actively developed by [Phạm Hùng Vương](https://github.com/phamhungvuong302).*
 
 **Independence notice:** Google TTS For NVDA is an independent, open-source accessibility project. It is not affiliated with, sponsored by, or endorsed by Google LLC. Google is a trademark of Google LLC.
 
@@ -34,12 +34,10 @@ For a long time, screen reader users have wished they could use familiar voices 
 
 ## Current Status
 
-Latest stable release: **Google TTS For NVDA 1.0**, last updated on **October 12, 2026**.
+Latest stable release: **Google TTS For NVDA 1.0**, last updated on **Oct 12, 2026**.
 
-Version 1.0 marks a significant step in the project's maturity. With a supported Chromium browser runtime available, Google TTS For NVDA is now a dependable choice for everyday NVDA use, offering faster long-text reading, broader multilingual text handling, steady speech output, and resilient runtime recovery.
-
-* Full change log for version 1.0: [Google TTS For NVDA 1.0 release notes](https://github.com/nguyenanhduc09/Google-TTS-For-NVDA/releases/tag/v1.0).
-* Download the latest stable package: [googleTtsForNvda-1.0.nvda-addon](https://github.com/nguyenanhduc09/Google-TTS-For-NVDA/releases/download/v1.0/googleTtsForNvda-1.0.nvda-addon).
+* Full change log for version 1.0: [Google TTS For NVDA 1.0 release notes](https://github.com/phamhungvuong302/Google-TTS-For-NVDA/releases/tag/v1.0).
+* Download the latest stable package: [googleTtsForNvda-1.0.nvda-addon](https://github.com/phamhungvuong302/Google-TTS-For-NVDA/releases/download/v1.0/googleTtsForNvda-1.0.nvda-addon).
 
 ---
 
@@ -69,16 +67,16 @@ Version 1.0 marks a significant step in the project's maturity. With a supported
 
 You can install Google TTS For NVDA in one of these ways:
 
-1. **Direct download:** Download the latest `.nvda-addon` file from the [Releases](https://github.com/nguyenanhduc09/Google-TTS-For-NVDA/releases) page. While NVDA is running, open the downloaded file directly from File Explorer and follow the prompts.
+1. **Direct download:** Download the latest `.nvda-addon` file from the [Releases](https://github.com/phamhungvuong302/Google-TTS-For-NVDA/releases) page. While NVDA is running, open the downloaded file directly from File Explorer and follow the prompts.
 2. **NVDA Add-on Store (External source):** In NVDA, open **NVDA Menu -> Tools -> Add-on Store**, choose **Install from external source**, select the downloaded `.nvda-addon` file, and confirm.
-3. **NVDA Add-on Store (Direct):** Once approved by NV Access, search for **Google TTS For NVDA** in the **Available add-ons** tab, press <kbd>Enter</kbd>, choose **Install**, and restart NVDA when prompted.
+3. **NVDA Add-on Store (Direct):** In NVDA, open **NVDA Menu -> Tools -> Add-on Store**, search for **Google TTS For NVDA** in the **Available add-ons** tab, press <kbd>Enter</kbd>, choose **Install**, and restart NVDA when prompted.
 
 ### First Run Setup
 
 1. Open NVDA's **Select Synthesizer** dialog by pressing <kbd>NVDA+Ctrl+S</kbd> and choose **Google TTS For NVDA**.
 2. If no voice packages are installed, NVDA will display a message indicating that no Google TTS For NVDA voices are installed. Press **OK** to open Google TTS Voice Manager and download a voice package. Press **Cancel** to keep using your current synthesizer for now.
 3. In Google TTS Voice Manager, download at least one voice package from the **Download** tab.
-4. Once downloaded, open **Speech settings** (<kbd>NVDA+Ctrl+V</kbd>) to select your preferred language and variant.
+4. Once downloaded, open **Speech Settings** (<kbd>NVDA+Ctrl+V</kbd>) to select your preferred language and variant.
 
 ---
 
@@ -108,12 +106,12 @@ On each tab, the controls appear in this order: **Filter by language**, **Check 
 
 ### Speech Settings
 
-NVDA's Speech settings dialog (<kbd>NVDA+Ctrl+V</kbd>) provides **Pauses** for Google TTS For NVDA whether automatic language profiles are on or off. When automatic language profiles are off, the dialog also provides:
+NVDA's Speech Settings dialog (<kbd>NVDA+Ctrl+V</kbd>) provides **Pauses** for Google TTS For NVDA whether automatic language profiles are on or off. When automatic language profiles are off, the dialog also provides:
 
 * **Voice:** Choose the installed Google TTS language.
 * **Variant:** Choose the voice name within that language, including Chrome OS and Google Natural voices when installed.
 * **Rate:** Adjust the reading speed. Non-SeaNet packages use the Chromium browser runtime rate path; SeaNet packages may use post-synthesis artificial rate processing at higher speeds.
-* **Rate Boost:** Enable to double the computed speech rate for fast reading. High-speed SeaNet speech may use more CPU because the add-on processes generated audio after synthesis.
+* **Rate boost:** Enable to double the computed speech rate for fast reading. High-speed SeaNet speech may use more CPU because the add-on processes generated audio after synthesis.
 * **Pitch:** Adjust the pitch of the voice.
 * **Volume:** Adjust the speech volume.
 * **Pauses:** Choose whether pauses stay unchanged, are shortened only at the end of text, or are shortened throughout speech for faster reading. This setting was inspired by the [IBMTTS driver for NVDA](https://github.com/davidacm/NVDA-IBMTTS-Driver) and applies to all Google TTS speech.
@@ -136,6 +134,8 @@ Under **NVDA Menu -> Preferences -> Settings -> Google TTS For NVDA**, you can c
   * **Automatically check for add-on updates when NVDA starts:** Let Google TTS For NVDA check once after the next NVDA startup. This is off by default.
   * **Add-on update status:** Review the installed add-on version, whether automatic startup checks are on or off, and whether a check is currently running.
   * **Check for updates...:** Manually check for the latest stable add-on release.
+* **Support the add-on:** Contains the donation button below:
+  * **Donate...:** Open the **Donate to Google TTS For NVDA** dialog, which notes that contributions are optional, includes the suggested transfer note (`Thanks for Google TTS For NVDA`), and provides buttons to open the maintainer's PayPal link in your browser or view all payment methods in [DONATE.md](DONATE.md) on GitHub (Vietnam bank transfer, PayPal, US ACH/Fedwire, and international SWIFT). If Windows cannot open a link automatically, the add-on displays the address in a read-only field with a **Copy link** button so you can open it manually.
 * **Input Gestures:** You can assign a custom shortcut to open this settings panel directly from **NVDA Menu -> Preferences -> Input Gestures** under the **Google TTS For NVDA** category.
 
 ### Custom Browser Runtime Paths
@@ -169,7 +169,7 @@ setx BRAVE_PATH "C:\Path\To\brave.exe"
 * **Manual Checks:** Open **NVDA Menu -> Preferences -> Settings -> Google TTS For NVDA** and press **Check for updates...**. If an update is available, the **Update information** dialog displays the release notes, download size, and version requirements. Choosing **Yes** downloads the package, then opens NVDA's standard add-on installer.
 * **Automatic Checks:** Enabling **Automatically check for add-on updates when NVDA starts** checks once silently after startup and notifies you only when a new release is available.
 * **Hotfix Builds:** The updater recognizes small hotfix builds within the same public version number, delivering urgent compatibility or stability fixes without waiting for a new major release.
-* **NVDA Add-on Store:** Once published in the Add-on Store, updates can also be installed directly from **NVDA Menu -> Tools -> Add-on Store -> Updatable add-ons**.
+* **NVDA Add-on Store:** Updates can also be installed directly from **NVDA Menu -> Tools -> Add-on Store -> Updatable add-ons**.
 
 ### Automatic Language Profiles
 
@@ -177,7 +177,7 @@ When **Use automatic language profiles** is enabled, the add-on dynamically appl
 
 1. Open **NVDA Menu -> Preferences -> Settings -> Google TTS For NVDA**.
 2. Check **Use automatic language profiles**.
-3. Move to **Preferred profile language** and select your primary language fallback. Only enabled languages appear in this list, so it may be empty until you enable a profile
+3. Move to **Preferred profile language** and select your primary language fallback. Only enabled languages appear in this list, so it may be empty until you enable a profile.
 4. Choose an **Automatic language profile** from the list.
 5. Check **Use this language profile** for each language you wish to activate.
 6. Configure **Variant**, **Rate**, **Rate boost**, **Pitch**, **Volume**, capital-letter handling, and spelling behavior for that language.
@@ -187,7 +187,7 @@ When **Use automatic language profiles** is enabled, the add-on dynamically appl
 Rate, pitch, and volume use slider controls like NVDA's Speech Settings. Capital-letter pitch uses a numeric edit/spin control so you can adjust it precisely.
 
 > [!NOTE]
-> While automatic language profiles are enabled, NVDA's Speech settings dialog (<kbd>NVDA+Ctrl+V</kbd>) and the synth settings ring (<kbd>NVDA+Ctrl+Shift+Arrow keys</kbd>) display a focusable notice directing you to configure voice parameters in the add-on settings category. This keeps per-language profile values protected from accidental overwrites. **Pauses** remains available in Speech settings and applies to all Google TTS speech. When automatic language profiles are turned off, normal Speech Settings controls and values immediately return.
+> While automatic language profiles are enabled, NVDA's Speech Settings dialog (<kbd>NVDA+Ctrl+V</kbd>) and the synth settings ring (<kbd>NVDA+Ctrl+Arrow keys</kbd> on desktop keyboards or <kbd>NVDA+Shift+Ctrl+Arrow keys</kbd> on laptop keyboards) display a focusable notice directing you to configure voice parameters in the add-on settings category. This keeps per-language profile values protected from accidental overwrites. **Pauses** remains available in Speech Settings and applies to all Google TTS speech. When automatic language profiles are turned off, normal Speech Settings controls and values immediately return.
 
 ---
 
@@ -235,11 +235,20 @@ The Chromium browser runtime, WASM TTS Engine, and selected voice package requir
 Because automatic language profiles manage separate voice, variant, rate, pitch, and spelling options for every enabled language, standard single-voice settings cannot represent all active profiles simultaneously. Presenting them separately protects both your normal voice preferences and your per-language configurations. Normal controls return immediately when automatic language profiles are disabled.
 
 ### Why do some voice package families show as "Not supported by the bundled engine"?
-In Google TTS Voice Manager, certain voice packages (such as packages containing **Locomel** or **Lemonbalm**) are marked with the status **Not supported by the bundled engine** and cannot be used:
+Out of the 180 voice packages listed in Google TTS Voice Manager, **168 are supported** (including standard multi-speaker `multi` voices, `seanet` enhanced voices, classical English `afh`/`fis` voices, and 8 standard **Lemonbalm** packages), while **12 packages**—containing **`locomel`** (6 packages) or **`darwinnrio`** (6 packages)—are marked **Not supported by the bundled engine** and cannot be used:
 
-* **Designed for Mobile Hardware:** Packages like *Lemonbalm* and *Locomel* were developed for Android devices and rely on specialized on-device neural hardware accelerators (such as Google's Edge TPU / Tensor NPU, codenamed *Darwinn Rio* in Google Pixel devices). Standard desktop computers do not have these mobile neural chips.
-* **WASM TTS Engine Capabilities:** The Chromium WebAssembly (WASM) TTS engine bundled with Google Chrome and this add-on is compiled specifically for desktop PC environments. While it fully supports Google's standard multi-speaker voices (`multi`), neural vocoder enhancement (`seanet`), and classical English packages (`afh`, `fis`), it deliberately omits the execution graphs and neural operators required by Locomel and Lemonbalm. In fact, Google's official Chrome TTS catalog only ships `multi` and `seanet` packages.
-* **Proactive Protection:** To prevent synthesizer errors, silent speech, or browser crashes, Google TTS For NVDA identifies these incompatible package families in the catalog and marks them as unsupported in advance. They are kept in the catalog so that if a future upstream WASM engine update introduces software decoding for them, they can be enabled smoothly.
+* **Standard CPU `Lemonbalm` voices are supported (8 packages):** Unlike the `darwinnrio` versions below, standard `lemonbalm` packages run on an ordinary computer processor (CPU) and work with the add-on's desktop WASM speech engine. Each one depends on its language's base `*-x-multi` package, which Voice Manager can download automatically for you:
+  * `de-de-x-news-lemonbalm`
+  * `en-in-x-news-lemonbalm`
+  * `en-us-x-blueginger-lemonbalm`
+  * `en-us-x-news-lemonbalm`
+  * `es-us-x-news-lemonbalm`
+  * `fr-fr-x-multi-lemonbalm`
+  * `hi-in-x-news-lemonbalm`
+  * `pt-br-x-news-lemonbalm`
+* **Why `darwinnrio` (`-darwinnrio-lemonbalm`, 6 packages) is not supported:** In Google's Android TTS app, `darwinnrio` packages are hardware-specific versions built for mobile AI accelerator chips (*Darwinn Rio* / Edge TPU) on devices such as Google Pixel phones. Standard Windows PCs do not have those mobile chips, and the desktop browser engine runs voices on your CPU instead. Every `darwinnrio` language already has a supported standard `lemonbalm` version in the list above you can download instead.
+* **Why `locomel` (6 packages) is not supported:** `Locomel` uses a separate Android-only voice engine design that Google did not include in the desktop Chromium WASM speech engine, so the add-on cannot play those packages.
+* **Why they remain visible in Voice Manager:** Keeping the full 180-package Google catalog intact while blocking incompatible packages in advance prevents silent speech, errors, or browser crashes—and allows those families to be enabled smoothly if a future desktop WASM engine update adds support for them.
 
 ### Does Microsoft Edge require WebView2 Runtime?
 Yes, but only when Microsoft Edge is the effective runtime. Google Chrome and Brave operate independently and do not require WebView2.
@@ -263,7 +272,7 @@ Do not rely on it there. Google TTS For NVDA requires an interactive Windows use
 
 To package the add-on yourself:
 
-1. Clone this repository: `git clone https://github.com/nguyenanhduc09/Google-TTS-For-NVDA.git`
+1. Clone this repository: `git clone https://github.com/phamhungvuong302/Google-TTS-For-NVDA.git`
 2. Ensure **Python** and **Node.js** are installed on your computer.
 3. Run the automated build script:
 
@@ -283,8 +292,13 @@ We value pull requests from the community. A contribution can be accepted when t
 
 ## Support & Contact
 
-If you have questions, feedback, or need assistance, feel free to contact the development team:
+If you have questions or feedback, or need assistance, please contact the current maintainer:
 
-* **[Nguyen Anh Duc](https://github.com/nguyenanhduc09):** [ducna1803@gmail.com](mailto:ducna1803@gmail.com) | Telegram: [t.me/anhduc1803](https://t.me/anhduc1803)
-* **[Dao Duc Trung](https://github.com/daoductrung):** [trung@ddt.one](mailto:trung@ddt.one) | Telegram: [t.me/Daoductrung](https://t.me/Daoductrung)
-* **[Pham Hung Vuong](https://github.com/phamhungvuong302):** [hungvuong106206@gmail.com](mailto:hungvuong106206@gmail.com) | Telegram: [t.me/phamhungvuong302](https://t.me/phamhungvuong302)
+* **Phạm Hùng Vương** *(Maintainer & Lead Developer)*: [hungvuong106206@gmail.com](mailto:hungvuong106206@gmail.com) | Telegram: [t.me/phamhungvuong302](https://t.me/phamhungvuong302)
+
+Original co-authors (no longer active developers):
+
+* **Nguyễn Anh Đức**: [ducna1803@gmail.com](mailto:ducna1803@gmail.com) | Telegram: [t.me/anhduc1803](https://t.me/anhduc1803)
+* **Đào Đức Trung**: [trung@ddt.one](mailto:trung@ddt.one) | Telegram: [t.me/Daoductrung](https://t.me/Daoductrung)
+
+Google TTS For NVDA is free, open-source software, and donations are completely optional. If you would like to support ongoing development, see [DONATE.md](DONATE.md) or choose **Donate...** under **NVDA Menu -> Preferences -> Settings -> Google TTS For NVDA**.

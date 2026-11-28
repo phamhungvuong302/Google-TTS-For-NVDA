@@ -7,28 +7,61 @@ synth driver.
 
 from __future__ import annotations
 
-import bisect
-import logging
+import math
 import unicodedata
 from collections.abc import Iterator, Sequence
 from functools import lru_cache
 from typing import Any
 
+from .audio_math import uses_protected_engine_rate
+from .language_profiles import (
+    in_codepoint_ranges as _in_codepoint_ranges,
+)
+from .language_profiles import (
+    is_closing_punctuation_codepoint as _is_closing_punctuation_codepoint,
+)
+from .language_profiles import (
+    is_combining_mark as _is_combining_mark,
+)
+from .language_profiles import (
+    is_letter_codepoint as _is_letter_codepoint,
+)
+from .language_profiles import (
+    is_number_codepoint as _is_number_codepoint,
+)
+from .language_profiles import (
+    is_wrapper_punctuation_codepoint as _is_wrapper_punctuation_codepoint,
+)
+from .language_profiles import (
+    lookup_codepoint_range as _lookup_codepoint_range,
+)
+from .language_profiles import (
+    punctuation_subcategory_codepoint as _punctuation_subcategory_codepoint,
+)
+from .language_utils import get_nvda_logger
 from .unicode_data import (
-    COMBINING_MARK_RANGES,
+    GRAPHEME_EXTEND_EXTRA_RANGES,
+    NO_SPACE_SCRIPT_RANGES,
     NORMALIZATION_TABLE,
+    REGIONAL_INDICATOR_RANGES,
     SCRIPT_RANGES,
     SENTENCE_TERMINAL_CODEPOINTS,
 )
 
-log = logging.getLogger(__name__)
+log = get_nvda_logger()
 
 PAUSE_MODE_DO_NOT_SHORTEN = "0"
 PAUSE_MODE_SHORTEN_END_ONLY = "1"
 PAUSE_MODE_SHORTEN_ALL = "2"
-SHORTENED_SILENCE_KEEP_MS = 35
-SHORTENED_ALL_PAUSES_KEEP_MS = 25
+SHORTENED_SILENCE_KEEP_MS = 20
+SHORTENED_ALL_PAUSES_KEEP_MS = 10
+MIN_PAUSE_SILENCE_THRESHOLD = 12
 SILENCE_SAMPLE_THRESHOLD = 48
+SEANET_RAW_SILENCE_THRESHOLD = 95
+MAX_PAUSE_SILENCE_THRESHOLD = 200
+TAIL_GLITCH_MAX_MS = 10
+TAIL_GLITCH_MIN_SILENCE_MS = 40
+TAIL_GLITCH_CEILING_CAP = 384
 PCM_BYTES_PER_SAMPLE = 2
 LIVE_MULTI_SEGMENT_LEAD_MS = 80
 SHORT_CACHE_MAX_CHARS = 5000
@@ -83,9 +116,8 @@ SOFT_BREAK_CHARS = (
     "\ufe10\ufe11\ufe13\ufe14\ufe50\ufe51\ufe54\ufe55\uff64"
 )
 ASCII_SENTENCE_TERMINATORS = ".!?"
-SENTENCE_TRAILING_CLOSERS = (
-    "'\"”’‘‛“‟)]}»«›‹」』）》〉〕〗〙〛】〞〟｣｠⦆\u3009\u300b\u300d\u300f\u3011\ufd3f\uff09\uff3d\uff5d"
-)
+SENTENCE_TRAILING_CLOSERS = "'\"”’‘‛“‟)]}»«›‹」』）》〉〕〗〙〛】〞〟｣｠⦆\ufd3f\uff3d\uff5d"
+_AMBIGUOUS_OPENING_QUOTES = frozenset("‘‛“‟«‹")
 # UCD Sentence_Terminal deliberately excludes some locale-specific or ambiguous
 # sentence endings. Keep only supported-language/common tailoring here.
 TAILORED_SENTENCE_TERMINATORS = set("\u037e\u0df4\u0e5a\u0e5b\u2026\u22ef")
@@ -110,9 +142,10 @@ NON_BREAKING_SOFT_PUNCTUATION = set(
     "\u00a7\u00b7\u05be\u05f3\u05f4"
     "\u0609\u060a\u060d\u066a\u066b\u066c"
     "\u104c\u104d\u104e\u104f"
-    "\u2010\u2011\u2020\u2021\u2027\u2030\u2031"
+    "\u2010\u2011\u2020\u2021\u2027\u2030\u2031\u2032\u2033\u2034"
     "\u30fb\ufe5f\ufe60\ufe61\ufe63\ufe68\ufe6a\ufe6b"
     "\uff02\uff03\uff05\uff06\uff07\uff0a\uff0d\uff0f\uff20\uff3c\uff3f\uff65"
+    "\U00010d6e\U0001e5ff"
 )
 NON_BREAKING_SOFT_PUNCTUATION_NAME_PARTS = (
     "APOSTROPHE",
@@ -128,8 +161,7 @@ NON_BREAKING_SOFT_PUNCTUATION_NAME_PARTS = (
 NO_SPACE_SCRIPT_PROFILES = (
     (
         (
-            (0x3100, 0x312F),
-            (0x31A0, 0x31BF),
+            *NO_SPACE_SCRIPT_RANGES.get("Bopomofo", ()),
             *SCRIPT_RANGES.get("Han", ()),
         ),
         80,
@@ -141,29 +173,9 @@ NO_SPACE_SCRIPT_PROFILES = (
         ),
         80,
     ),
-    (SCRIPT_RANGES.get("Thai", ((0x0E00, 0x0E7F),)), 70),
-    (((0x0E80, 0x0EFF),), 70),
-    (((0x1900, 0x194F),), 70),
-    (((0x1950, 0x197F),), 70),
-    (((0x1980, 0x19DF),), 70),
-    (((0x1A00, 0x1A1F),), 70),
-    (((0x1A20, 0x1AAF),), 70),
-    (SCRIPT_RANGES.get("Khmer", ((0x1780, 0x17FF),)), 70),
-    (((0x1000, 0x109F), (0xA9E0, 0xA9FF), (0xAA60, 0xAA7F)), 70),
-    (((0x0F00, 0x0FFF),), 70),
-    (((0x1700, 0x171F),), 70),
-    (((0x1720, 0x173F),), 70),
-    (((0x1740, 0x175F),), 70),
-    (((0x1760, 0x177F),), 70),
-    (((0x1B00, 0x1B7F),), 70),
-    (((0x1B80, 0x1BBF),), 70),
-    (((0x1BC0, 0x1BFF),), 70),
-    (((0x1C00, 0x1C4F),), 70),
-    (((0xA000, 0xA48F),), 70),
-    (((0xA930, 0xA95F),), 70),
-    (((0xA980, 0xA9DF),), 70),
-    (((0xAA00, 0xAA5F),), 70),
-    (((0xAA80, 0xAADF),), 70),
+    (SCRIPT_RANGES.get("Thai", ()), 70),
+    (SCRIPT_RANGES.get("Khmer", ()), 70),
+    *((ranges, 70) for script, ranges in NO_SPACE_SCRIPT_RANGES.items() if script != "Bopomofo"),
 )
 _FLATTENED_NO_SPACE_RANGES: tuple[tuple[int, int, int], ...] = tuple(
     sorted(
@@ -172,35 +184,20 @@ _FLATTENED_NO_SPACE_RANGES: tuple[tuple[int, int, int], ...] = tuple(
     )
 )
 _FLATTENED_NO_SPACE_STARTS: tuple[int, ...] = tuple(start for start, _end, _limit in _FLATTENED_NO_SPACE_RANGES)
-
-
-_COMBINING_MARK_STARTS: tuple[int, ...] = tuple(start for start, _ in COMBINING_MARK_RANGES)
+_GRAPHEME_EXTEND_EXTRA_STARTS: tuple[int, ...] = tuple(start for start, _ in GRAPHEME_EXTEND_EXTRA_RANGES)
+_REGIONAL_INDICATOR_STARTS: tuple[int, ...] = tuple(start for start, _ in REGIONAL_INDICATOR_RANGES)
 
 
 def _find_no_space_range(codepoint: int) -> tuple[int, int, int] | None:
-    idx = bisect.bisect_right(_FLATTENED_NO_SPACE_STARTS, codepoint) - 1
-    if idx >= 0:
-        entry = _FLATTENED_NO_SPACE_RANGES[idx]
-        if entry[0] <= codepoint <= entry[1]:
-            return entry
-    return None
-
-
-def _is_combining_mark(codepoint: int) -> bool:
-    if codepoint < 0x0300:
-        return False
-    idx = bisect.bisect_right(_COMBINING_MARK_STARTS, codepoint) - 1
-    if idx >= 0:
-        start, end = COMBINING_MARK_RANGES[idx]
-        if start <= codepoint <= end:
-            return True
-    return unicodedata.category(chr(codepoint)).startswith("M")
+    entry = _lookup_codepoint_range(codepoint, _FLATTENED_NO_SPACE_STARTS, _FLATTENED_NO_SPACE_RANGES)
+    return entry if isinstance(entry, tuple) else None
 
 
 def _is_word_character(character: str) -> bool:
     if not character:
         return False
-    return character.isalnum() or _is_combining_mark(ord(character))
+    cp = ord(character)
+    return _is_letter_codepoint(cp) or _is_number_codepoint(cp) or _is_combining_mark(cp)
 
 
 COMMON_ABBREVIATIONS: frozenset[str] = frozenset()
@@ -213,8 +210,34 @@ COMMON_ABBREVIATIONS: frozenset[str] = frozenset()
 _SPEECH_SANITIZE_TABLE: dict[int, str] = {
     cp: " " for cp, replacement in NORMALIZATION_TABLE.items() if replacement in (" ", "\n")
 }
+for _surrogate_codepoint in range(0xD800, 0xE000):
+    _SPEECH_SANITIZE_TABLE[_surrogate_codepoint] = " "
 for _pua_codepoint in range(0xE000, 0xF900):
     _SPEECH_SANITIZE_TABLE[_pua_codepoint] = " "
+
+_URL_SCHEMES = frozenset(
+    {
+        "http",
+        "https",
+        "ftp",
+        "ftps",
+        "mailto",
+        "tel",
+        "sms",
+        "urn",
+        "data",
+        "about",
+        "blob",
+        "file",
+        "news",
+        "cid",
+        "mid",
+        "geo",
+        "magnet",
+        "ws",
+        "wss",
+    }
+)
 
 
 def pcm_bytes_for_milliseconds(milliseconds: int, sampleRate: int, bytesPerSample: int = PCM_BYTES_PER_SAMPLE) -> int:
@@ -224,6 +247,47 @@ def pcm_bytes_for_milliseconds(milliseconds: int, sampleRate: int, bytesPerSampl
 
 def align_pcm_bytes(byteCount: int, bytesPerSample: int = PCM_BYTES_PER_SAMPLE) -> int:
     return max(0, int(byteCount) - (int(byteCount) % bytesPerSample))
+
+
+def interpolate_byte_offset(
+    charOffset: int,
+    totalCharacters: int,
+    totalBytes: int,
+    checkpoints: Sequence[tuple[int, int]] | None = None,
+    *,
+    bytesPerSample: int = PCM_BYTES_PER_SAMPLE,
+) -> int:
+    """Map a character offset to an aligned PCM byte offset using word checkpoints when available."""
+    if totalBytes <= 0 or totalCharacters <= 0:
+        return 0
+    clampedChar = max(0, min(totalCharacters, int(charOffset)))
+    if clampedChar <= 0:
+        return 0
+    if clampedChar >= totalCharacters:
+        return align_pcm_bytes(totalBytes, bytesPerSample)
+    if checkpoints:
+        prevChar = 0
+        prevByte = 0
+        for rawChar, rawByte in checkpoints:
+            cpChar = max(prevChar, min(totalCharacters, int(rawChar)))
+            cpByte = max(prevByte, min(totalBytes, align_pcm_bytes(int(rawByte), bytesPerSample)))
+            if cpChar >= clampedChar:
+                spanChars = cpChar - prevChar
+                if spanChars <= 0:
+                    return cpByte
+                ratio = (clampedChar - prevChar) / spanChars
+                mappedByte = prevByte + int(ratio * (cpByte - prevByte))
+                return max(0, min(totalBytes, align_pcm_bytes(mappedByte, bytesPerSample)))
+            prevChar = cpChar
+            prevByte = cpByte
+        spanChars = totalCharacters - prevChar
+        if spanChars <= 0:
+            return align_pcm_bytes(prevByte, bytesPerSample)
+        ratio = (clampedChar - prevChar) / spanChars
+        mappedByte = prevByte + int(ratio * (totalBytes - prevByte))
+        return max(0, min(totalBytes, align_pcm_bytes(mappedByte, bytesPerSample)))
+    mappedByte = int((clampedChar / max(1, totalCharacters)) * totalBytes)
+    return max(0, min(totalBytes, align_pcm_bytes(mappedByte, bytesPerSample)))
 
 
 def pcm_has_audible_sample(
@@ -238,11 +302,11 @@ def pcm_has_audible_sample(
     if pcmLength <= 0:
         return False
     samples = memoryview(pcm)[:pcmLength].cast("h")
-    return any(sample < -noiseFloor or sample > noiseFloor for sample in samples)
+    return min(samples) < -noiseFloor or max(samples) > noiseFloor
 
 
 class PcmSilenceShortener:
-    """Shorten final or all silent PCM runs with a streaming block fast path."""
+    """Shorten final or all silent PCM runs using block-level processing."""
 
     def __init__(
         self,
@@ -252,6 +316,11 @@ class PcmSilenceShortener:
         keepSilenceMs: int = SHORTENED_SILENCE_KEEP_MS,
         noiseFloor: int = SILENCE_SAMPLE_THRESHOLD,
         bytesPerSample: int = PCM_BYTES_PER_SAMPLE,
+        minPauseTriggerMs: int = 0,
+        trimLeadingSilence: bool = False,
+        tailGlitchMaxMs: int = TAIL_GLITCH_MAX_MS,
+        tailGlitchMinSilenceMs: int = TAIL_GLITCH_MIN_SILENCE_MS,
+        tailGlitchCeiling: int | None = None,
     ) -> None:
         if bytesPerSample != 2:
             raise ValueError("Only signed 16-bit PCM is supported")
@@ -259,48 +328,133 @@ class PcmSilenceShortener:
         self._noiseFloor = max(0, int(noiseFloor))
         self._bytesPerSample = bytesPerSample
         self._heldSilence = bytearray()
+        self._heldRawLength = 0
         self._partialSample = bytearray()
         self._pendingBlock = bytearray()
+        self._pendingTail = bytearray()
+        self._sawAudible = False
+        self._trimLeadingSilence = bool(trimLeadingSilence)
         self._keepSilenceBytes = pcm_bytes_for_milliseconds(keepSilenceMs, sampleRate, bytesPerSample)
+        self._minTriggerBytes = pcm_bytes_for_milliseconds(max(0, int(minPauseTriggerMs)), sampleRate, bytesPerSample)
+        self._maxHoldBytes = max(
+            self._keepSilenceBytes,
+            pcm_bytes_for_milliseconds(60000, sampleRate, bytesPerSample),
+        )
         self._blockSizeSamples = max(1, sampleRate // 200)  # 5ms blocks
         self._blockSizeBytes = self._blockSizeSamples * bytesPerSample
+        self._tailGlitchMaxBytes = pcm_bytes_for_milliseconds(max(0, int(tailGlitchMaxMs)), sampleRate, bytesPerSample)
+        self._tailGlitchMinSilenceBytes = pcm_bytes_for_milliseconds(
+            max(0, int(tailGlitchMinSilenceMs)),
+            sampleRate,
+            bytesPerSample,
+        )
+        if tailGlitchCeiling is None:
+            defaultCeiling = max(self._noiseFloor * 2, self._noiseFloor + 64)
+            self._tailGlitchCeiling = max(self._noiseFloor, min(TAIL_GLITCH_CEILING_CAP, defaultCeiling))
+        else:
+            self._tailGlitchCeiling = max(self._noiseFloor, int(tailGlitchCeiling))
+
+    @staticmethod
+    def _find_first_audible(samples: memoryview, floor: int) -> int:
+        negFloor = -floor
+        for index, sample in enumerate(samples):
+            if sample < negFloor or sample > floor:
+                return index
+        return len(samples)
+
+    @staticmethod
+    def _find_last_audible(samples: memoryview, floor: int) -> int:
+        negFloor = -floor
+        for index in range(len(samples) - 1, -1, -1):
+            sample = samples[index]
+            if sample < negFloor or sample > floor:
+                return index
+        return -1
 
     def _release_held_silence(self, *, final: bool) -> bytes:
         if not self._heldSilence:
+            self._heldRawLength = 0
             return b""
-        if final or self._shortenAllPauses:
-            output = bytes(self._heldSilence[: self._keepSilenceBytes])
-        else:
-            output = bytes(self._heldSilence)
+        if self._trimLeadingSilence and not self._sawAudible:
+            self._heldSilence.clear()
+            self._heldRawLength = 0
+            return b""
+        shouldShorten = final or (
+            self._shortenAllPauses and (not self._sawAudible or self._heldRawLength >= self._minTriggerBytes)
+        )
+        output = bytes(self._heldSilence[: self._keepSilenceBytes]) if shouldShorten else bytes(self._heldSilence)
         self._heldSilence.clear()
+        self._heldRawLength = 0
         return output
 
     def _hold_silence(self, pcm: bytes) -> None:
         if not pcm:
             return
-        if not self._shortenAllPauses:
-            self._heldSilence.extend(pcm)
-            return
-        bytesNeeded = self._keepSilenceBytes - len(self._heldSilence)
+        limit = max(self._keepSilenceBytes, self._minTriggerBytes) if self._shortenAllPauses else self._maxHoldBytes
+        bytesNeeded = limit - len(self._heldSilence)
         if bytesNeeded > 0:
             self._heldSilence.extend(pcm[:bytesNeeded])
+        self._heldRawLength += len(pcm)
 
-    def _process_block(self, pcm: bytes) -> bytes:
+    def _consume_silent(self, pcm: bytes) -> bytes:
         if not pcm:
             return b""
-        samples = memoryview(pcm).cast("h")
-        floor = self._noiseFloor
-        if not any(s < -floor or s > floor for s in samples):
+        if self._pendingTail:
+            if len(self._pendingTail) + len(pcm) <= self._tailGlitchMaxBytes:
+                self._pendingTail.extend(pcm)
+                return b""
+            output = self._promote_pending_tail()
             self._hold_silence(pcm)
-            return b""
+            return output
+        self._hold_silence(pcm)
+        return b""
 
-        # Mixed blocks contain a silence/audio transition. Preserve sample-accurate
-        # boundaries here while uniform silence blocks use the cheaper fast path above.
+    def _promote_pending_tail(self) -> bytes:
+        if not self._pendingTail:
+            return b""
+        buffered = bytes(self._pendingTail)
+        self._pendingTail.clear()
+        return self._process_audible_no_glitch(buffered)
+
+    def _can_use_audible_fast_path(self, sampleCount: int) -> bool:
+        if not self._shortenAllPauses:
+            return True
+        maxInternalSilenceBytes = max(0, (sampleCount - 2) * self._bytesPerSample)
+        return maxInternalSilenceBytes <= self._keepSilenceBytes or maxInternalSilenceBytes < self._minTriggerBytes
+
+    def _process_audible_no_glitch(self, pcm: bytes, samples: memoryview | None = None) -> bytes:
+        if not pcm:
+            return b""
+        if samples is None:
+            samples = memoryview(pcm).cast("h")
+        floor = self._noiseFloor
+        sampleCount = len(samples)
+        if self._can_use_audible_fast_path(sampleCount):
+            firstAudible = self._find_first_audible(samples, floor)
+            if firstAudible >= sampleCount:
+                self._hold_silence(pcm)
+                return b""
+            if firstAudible > 0:
+                self._hold_silence(pcm[: firstAudible * self._bytesPerSample])
+            released = self._release_held_silence(final=False)
+            self._sawAudible = True
+            self._trimLeadingSilence = False
+            lastAudible = self._find_last_audible(samples, floor)
+            if firstAudible == 0 and lastAudible == sampleCount - 1:
+                return released + pcm if released else pcm
+            middle = pcm[firstAudible * self._bytesPerSample : (lastAudible + 1) * self._bytesPerSample]
+            if lastAudible < sampleCount - 1:
+                self._hold_silence(pcm[(lastAudible + 1) * self._bytesPerSample :])
+            return released + middle if released else middle
+
+        # Exact sample-by-sample fallback when both keepSilenceMs and minPauseTriggerMs
+        # are smaller than a single detection block so short internal silences can still trim.
         output = bytearray()
+        negFloor = -floor
         runStart = 0
-        runIsSilence = -self._noiseFloor <= samples[0] <= self._noiseFloor
-        for sampleIndex in range(1, len(samples)):
-            isSilence = -self._noiseFloor <= samples[sampleIndex] <= self._noiseFloor
+        runIsSilence = negFloor <= samples[0] <= floor
+        for sampleIndex in range(1, sampleCount):
+            isSilence = negFloor <= samples[sampleIndex] <= floor
             if isSilence == runIsSilence:
                 continue
             run = pcm[runStart * self._bytesPerSample : sampleIndex * self._bytesPerSample]
@@ -308,6 +462,8 @@ class PcmSilenceShortener:
                 self._hold_silence(run)
             else:
                 output.extend(self._release_held_silence(final=False))
+                self._sawAudible = True
+                self._trimLeadingSilence = False
                 output.extend(run)
             runStart = sampleIndex
             runIsSilence = isSilence
@@ -316,8 +472,43 @@ class PcmSilenceShortener:
             self._hold_silence(run)
         else:
             output.extend(self._release_held_silence(final=False))
+            self._sawAudible = True
+            self._trimLeadingSilence = False
             output.extend(run)
         return bytes(output)
+
+    def _process_block(self, pcm: bytes) -> bytes:
+        if not pcm:
+            return b""
+        samples = memoryview(pcm).cast("h")
+        floor = self._noiseFloor
+        minSample = min(samples)
+        maxSample = max(samples)
+        if minSample >= -floor and maxSample <= floor:
+            return self._consume_silent(pcm)
+
+        ceiling = self._tailGlitchCeiling
+        lowAmplitude = minSample >= -ceiling and maxSample <= ceiling
+        if self._pendingTail:
+            if lowAmplitude and len(self._pendingTail) + len(pcm) <= self._tailGlitchMaxBytes:
+                self._pendingTail.extend(pcm)
+                return b""
+            promoted = self._promote_pending_tail()
+            rest = self._process_audible_no_glitch(pcm, samples=samples)
+            return promoted + rest if promoted else rest
+
+        if self._tailGlitchMaxBytes > 0 and lowAmplitude:
+            firstAudible = self._find_first_audible(samples, floor)
+            leadingBytes = firstAudible * self._bytesPerSample
+            if self._heldRawLength + leadingBytes >= self._tailGlitchMinSilenceBytes:
+                tailPart = pcm[leadingBytes:]
+                if len(tailPart) <= self._tailGlitchMaxBytes:
+                    if leadingBytes:
+                        self._hold_silence(pcm[:leadingBytes])
+                    self._pendingTail.extend(tailPart)
+                    return b""
+
+        return self._process_audible_no_glitch(pcm, samples=samples)
 
     def feed(self, pcm: bytes) -> bytes:
         if not pcm:
@@ -337,10 +528,14 @@ class PcmSilenceShortener:
         completeLength = len(pcm) - (len(pcm) % self._blockSizeBytes)
         if completeLength < len(pcm):
             self._pendingBlock.extend(pcm[completeLength:])
+        if completeLength <= 0:
+            return b""
         output = bytearray()
         for blockStart in range(0, completeLength, self._blockSizeBytes):
             blockEnd = blockStart + self._blockSizeBytes
-            output.extend(self._process_block(pcm[blockStart:blockEnd]))
+            processed = self._process_block(pcm[blockStart:blockEnd])
+            if processed:
+                output.extend(processed)
         return bytes(output)
 
     def _flush(self, *, shortenPause: bool) -> bytes:
@@ -350,12 +545,24 @@ class PcmSilenceShortener:
         if self._pendingBlock:
             output.extend(self._process_block(bytes(self._pendingBlock)))
             self._pendingBlock.clear()
+        if self._pendingTail:
+            if shortenPause:
+                # Discard short low-amplitude neural vocoder edge artifacts at EOF
+                # so trailing silence shortening remains consistent on SeaNet/Lemonbalm voices.
+                self._pendingTail.clear()
+            else:
+                output.extend(self._promote_pending_tail())
         output.extend(self._release_held_silence(final=shortenPause))
+        self._trimLeadingSilence = False
         return bytes(output)
 
-    def flush_boundary(self, *, shortenPause: bool) -> bytes:
+    def flush_boundary(self, *, shortenPause: bool, trimNextLeadingSilence: bool = False) -> bytes:
         """Flush a hidden-segment boundary without treating it as the end of all text."""
-        return self._flush(shortenPause=shortenPause)
+        output = self._flush(shortenPause=shortenPause)
+        if trimNextLeadingSilence:
+            self._sawAudible = False
+            self._trimLeadingSilence = True
+        return output
 
     def finish(self) -> bytes:
         return self._flush(shortenPause=True)
@@ -391,35 +598,65 @@ class PcmLeadBuffer:
         return output
 
 
+def _coerce_finite_float(value: Any, default: float = 1.0) -> float:
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return numeric if math.isfinite(numeric) else default
+
+
 def effective_chrome_rate(options: dict[str, Any]) -> float:
     """Return the combined effective speech rate multiplier from speech options."""
-    try:
-        engineRate = float(options.get("rate", 1.0) or 1.0)
-    except (TypeError, ValueError):
-        engineRate = 1.0
-    try:
-        artificialRate = float(options.get("artificialRate", 1.0) or 1.0)
-    except (TypeError, ValueError):
-        artificialRate = 1.0
+    engineRate = max(0.0, _coerce_finite_float(options.get("rate"), 1.0))
+    artificialRate = max(0.0, _coerce_finite_float(options.get("artificialRate"), 1.0))
     return max(0.1, engineRate * artificialRate)
 
 
 def keep_silence_ms_for_rate(pauseMode: str, chromeRate: float) -> int:
     """Calculate the mode-specific kept silence duration in milliseconds for the active rate."""
-    rate = max(0.35, float(chromeRate))
+    if pauseMode == PAUSE_MODE_DO_NOT_SHORTEN:
+        return 0
+    numericRate = _coerce_finite_float(chromeRate, 1.0)
+    rate = max(0.35, numericRate)
     if rate <= 1.175:
-        shortenAllMs = int(round(45 - (rate - 0.35) * 20 / 0.825))
+        shortenAllMs = int(round(22 - (rate - 0.35) * 12 / 0.825))
     else:
-        shortenAllMs = int(round(25 - (rate - 1.175) * 10 / 2.825))
-    shortenAllMs = max(15, min(45, shortenAllMs))
+        shortenAllMs = int(round(10 - (rate - 1.175) * 5 / 2.825))
+    shortenAllMs = max(5, min(22, shortenAllMs))
     if pauseMode == PAUSE_MODE_SHORTEN_END_ONLY:
         modeDelta = SHORTENED_SILENCE_KEEP_MS - SHORTENED_ALL_PAUSES_KEEP_MS
-        return max(15 + modeDelta, min(45 + modeDelta, shortenAllMs + modeDelta))
+        return max(5 + modeDelta, min(22 + modeDelta, shortenAllMs + modeDelta))
     return shortenAllMs
 
 
+def min_pause_trigger_ms_for_rate(chromeRate: float) -> int:
+    """Minimum silent run duration to trim mid-speech so brief stop closures stay intact."""
+    numericRate = _coerce_finite_float(chromeRate, 1.0)
+    return max(18, min(45, int(round(48.0 / max(1.0, numericRate)))))
+
+
+def pause_silence_noise_floor(packageId: str, options: dict[str, Any]) -> int:
+    """Scale silence detection threshold proportionally to post-gain output and neural noise floors."""
+    rawOutputGain = options.get("outputGain")
+    outputGain = _coerce_finite_float(rawOutputGain, 1.0)
+    if outputGain <= 0.0:
+        outputGain = 1.0
+    rawThreshold = SEANET_RAW_SILENCE_THRESHOLD if uses_protected_engine_rate(packageId) else SILENCE_SAMPLE_THRESHOLD
+    scaled = int(round(rawThreshold * outputGain))
+    return max(MIN_PAUSE_SILENCE_THRESHOLD, min(MAX_PAUSE_SILENCE_THRESHOLD, scaled))
+
+
 def create_pcm_silence_shortener(
-    pauseMode: str, sampleRate: int, keepSilenceMs: int | None = None
+    pauseMode: str,
+    sampleRate: int,
+    keepSilenceMs: int | None = None,
+    *,
+    noiseFloor: int = SILENCE_SAMPLE_THRESHOLD,
+    minPauseTriggerMs: int = 0,
+    trimLeadingSilence: bool = False,
 ) -> PcmSilenceShortener | None:
     if pauseMode == PAUSE_MODE_DO_NOT_SHORTEN:
         return None
@@ -428,12 +665,18 @@ def create_pcm_silence_shortener(
             sampleRate=sampleRate,
             shortenAllPauses=False,
             keepSilenceMs=keepSilenceMs if keepSilenceMs is not None else SHORTENED_SILENCE_KEEP_MS,
+            noiseFloor=noiseFloor,
+            minPauseTriggerMs=minPauseTriggerMs,
+            trimLeadingSilence=trimLeadingSilence,
         )
     if pauseMode == PAUSE_MODE_SHORTEN_ALL:
         return PcmSilenceShortener(
             sampleRate=sampleRate,
             shortenAllPauses=True,
             keepSilenceMs=keepSilenceMs if keepSilenceMs is not None else SHORTENED_ALL_PAUSES_KEEP_MS,
+            noiseFloor=noiseFloor,
+            minPauseTriggerMs=minPauseTriggerMs,
+            trimLeadingSilence=trimLeadingSilence,
         )
     raise ValueError(f"Unknown pause mode: {pauseMode!r}")
 
@@ -471,6 +714,7 @@ def segment_audio_cache_key(
     *,
     hasPreviousSegment: bool,
     hasNextSegment: bool,
+    trimLeadingSilence: bool = False,
     maxChars: int = SHORT_CACHE_MAX_CHARS,
 ) -> tuple[Any, ...] | None:
     """Build a cache key for PCM whose hidden-boundary context is complete."""
@@ -483,15 +727,21 @@ def segment_audio_cache_key(
         postPitch = float(options.get("postPitch", 1))
     except (TypeError, ValueError):
         return None
-    if abs(artificialRate - 1) >= 0.001 or abs(postPitch - 1) >= 0.001:
+    if (
+        not math.isfinite(artificialRate)
+        or not math.isfinite(postPitch)
+        or abs(artificialRate - 1) >= 0.001
+        or abs(postPitch - 1) >= 0.001
+    ):
         return None
     return (
-        "segment-v1",
+        "segment-v2",
         text,
         *(options.get(field) for field in SHORT_AUDIO_CACHE_OPTION_FIELDS),
         pauseShorteningMode,
         bool(hasPreviousSegment),
         bool(hasNextSegment),
+        bool(trimLeadingSilence),
     )
 
 
@@ -529,7 +779,7 @@ def is_sentence_terminator_character(character: str) -> bool:
     """Return True if *character* is a Unicode sentence terminator.
 
     Public wrapper that covers both UCD Sentence_Terminal codepoints and
-    the add-on's tailored tailoring (e.g. ellipsis, Thai Angular punctuation,
+    the add-on's custom tailoring (e.g. ellipsis, Thai punctuation,
     Greek question mark).
     """
     return _is_sentence_terminator_character(character)
@@ -545,7 +795,7 @@ def _is_soft_break_character(character: str) -> bool:
         return False
     if _is_sentence_terminator_character(character):
         return True
-    category = unicodedata.category(character)
+    category = _punctuation_subcategory_codepoint(ord(character))
     if character in NON_BREAKING_SOFT_PUNCTUATION:
         return False
     name = _unicode_name(character)
@@ -559,36 +809,25 @@ def _is_soft_break_character(character: str) -> bool:
 
 
 @lru_cache(maxsize=4096)
-def _is_colon_like_character(character: str) -> bool:
-    if len(character) != 1:
-        return False
-    return character in ":：" or "COLON" in _unicode_name(character)
-
-
-@lru_cache(maxsize=4096)
 def _is_dash_like_character(character: str) -> bool:
     if len(character) != 1:
         return False
-    return character in "\u05be\u2013\u2014\u2015" or "DASH" in _unicode_name(character)
+    return character in "\u2013\u2014\u2015" or "DASH" in _unicode_name(character)
 
 
 @lru_cache(maxsize=1024)
 def _is_sentence_trailing_closer(character: str) -> bool:
     if len(character) != 1:
         return False
-    return character in SENTENCE_TRAILING_CLOSERS or unicodedata.category(character) in {"Pe", "Pf"}
+    return character in SENTENCE_TRAILING_CLOSERS or _is_closing_punctuation_codepoint(ord(character))
 
 
 def _strip_surrounding_wrappers(token: str, extraChars: str = "") -> str:
     start = 0
     end = len(token)
-    while start < end and (
-        token[start] in extraChars or unicodedata.category(token[start]) in {"Ps", "Pe", "Pi", "Pf"}
-    ):
+    while start < end and (token[start] in extraChars or _is_wrapper_punctuation_codepoint(ord(token[start]))):
         start += 1
-    while end > start and (
-        token[end - 1] in extraChars or unicodedata.category(token[end - 1]) in {"Ps", "Pe", "Pi", "Pf"}
-    ):
+    while end > start and (token[end - 1] in extraChars or _is_wrapper_punctuation_codepoint(ord(token[end - 1]))):
         end -= 1
     return token[start:end]
 
@@ -599,10 +838,34 @@ def _is_no_space_script_character(character: str) -> bool:
     if character.isascii():
         return False
     codepoint = ord(character)
-    category = unicodedata.category(character)
-    if not (category.startswith("L") or category.startswith("M")):
+    if not (_is_letter_codepoint(codepoint) or _is_combining_mark(codepoint)):
         return False
     return _find_no_space_range(codepoint) is not None
+
+
+def _is_grapheme_extend_codepoint(codepoint: int) -> bool:
+    return _is_combining_mark(codepoint) or _in_codepoint_ranges(
+        codepoint, _GRAPHEME_EXTEND_EXTRA_STARTS, GRAPHEME_EXTEND_EXTRA_RANGES
+    )
+
+
+def _is_cjk_or_fullwidth_punctuation(character: str) -> bool:
+    if len(character) != 1:
+        return False
+    codepoint = ord(character)
+    if 0x3000 <= codepoint <= 0x303F:
+        return True
+    return 0xFF00 <= codepoint <= 0xFFEF and not (_is_letter_codepoint(codepoint) or _is_number_codepoint(codepoint))
+
+
+def _is_spacing_exempt_boundary(previousCharacter: str, nextCharacter: str) -> bool:
+    if not previousCharacter or not nextCharacter:
+        return True
+    if previousCharacter.isspace() or nextCharacter.isspace():
+        return True
+    if _is_no_space_script_character(previousCharacter) or _is_no_space_script_character(nextCharacter):
+        return True
+    return _is_cjk_or_fullwidth_punctuation(previousCharacter) or _is_cjk_or_fullwidth_punctuation(nextCharacter)
 
 
 class TextSegmenter:
@@ -654,34 +917,46 @@ class TextSegmenter:
             return "".join(" " if 0xF0000 <= ord(character) <= 0x10FFFD else character for character in sanitized)
         return sanitized
 
+    def _spoken_boundary_previous_character(self, text: str) -> str:
+        index = len(text) - 1
+        while index > 0 and _is_grapheme_extend_codepoint(ord(text[index])):
+            index -= 1
+        effectiveCharacter = text[index]
+        closerIndex = index
+        while closerIndex > 0 and (
+            _is_sentence_trailing_closer(text[closerIndex]) or _is_grapheme_extend_codepoint(ord(text[closerIndex]))
+        ):
+            closerIndex -= 1
+        if closerIndex != index and _is_sentence_terminator_character(text[closerIndex]):
+            return text[closerIndex]
+        return effectiveCharacter
+
     def spoken_bridge_segments(self, segments: list[str]) -> list[str]:
         spokenSegments: list[str] = []
         for segment in segments:
-            if (
-                spokenSegments
-                and spokenSegments[-1]
-                and segment
-                and self._needs_spoken_segment_space(spokenSegments[-1][-1], segment[0])
-            ):
-                spokenSegments[-1] += " "
+            if spokenSegments and spokenSegments[-1] and segment:
+                rawPrevious = spokenSegments[-1][-1]
+                if not _is_spacing_exempt_boundary(rawPrevious, segment[0]) and self._needs_spoken_segment_space(
+                    self._spoken_boundary_previous_character(spokenSegments[-1]),
+                    segment[0],
+                ):
+                    spokenSegments[-1] += " "
             spokenSegments.append(segment)
         return spokenSegments
 
     def _needs_spoken_segment_space(self, previousCharacter: str, nextCharacter: str) -> bool:
-        if not _is_word_character(previousCharacter) or not _is_word_character(nextCharacter):
+        if _is_spacing_exempt_boundary(previousCharacter, nextCharacter):
             return False
-        return not (_is_no_space_script_character(previousCharacter) or _is_no_space_script_character(nextCharacter))
+        if _is_word_character(previousCharacter) and _is_word_character(nextCharacter):
+            return True
+        if _is_sentence_terminator_character(previousCharacter):
+            return not _is_sentence_terminator_character(nextCharacter)
+        if previousCharacter in ",;" and _is_word_character(nextCharacter):
+            return not (previousCharacter == "," and _is_number_codepoint(ord(nextCharacter)))
+        return previousCharacter == ":" and _is_letter_codepoint(ord(nextCharacter))
 
     def needs_index_boundary_space(self, previousCharacter: str, nextCharacter: str) -> bool:
-        if not previousCharacter or not nextCharacter:
-            return False
-        if previousCharacter.isspace() or nextCharacter.isspace():
-            return False
-        if _is_no_space_script_character(previousCharacter) or _is_no_space_script_character(nextCharacter):
-            return False
-        if 0x3000 <= ord(previousCharacter) <= 0x303F or 0xFF00 <= ord(previousCharacter) <= 0xFFEF:
-            return False
-        return not (0x3000 <= ord(nextCharacter) <= 0x303F or 0xFF00 <= ord(nextCharacter) <= 0xFFEF)
+        return not _is_spacing_exempt_boundary(previousCharacter, nextCharacter)
 
     def find_sentence_splits(self, text: str) -> list[int]:
         splits: list[int] = []
@@ -695,9 +970,21 @@ class TextSegmenter:
             index += 1
             while index < len(text) and _is_sentence_terminator_character(text[index]):
                 index += 1
+            index = self._extend_cut_over_combining_marks(text, index, len(text))
             terminatorEnd = index
             while index < len(text) and _is_sentence_trailing_closer(text[index]):
+                # In unspaced scripts (e.g. CJK), an opening quote like “ immediately
+                # before the next sentence belongs to the next sentence unless followed
+                # by whitespace, another closer, or end-of-text.
+                if (
+                    text[index] in _AMBIGUOUS_OPENING_QUOTES
+                    and index + 1 < len(text)
+                    and not text[index + 1].isspace()
+                    and not _is_sentence_trailing_closer(text[index + 1])
+                ):
+                    break
                 index += 1
+            index = self._extend_cut_over_combining_marks(text, index, len(text))
             whitespaceStart = index
             while index < len(text) and text[index].isspace():
                 index += 1
@@ -796,23 +1083,24 @@ class TextSegmenter:
                 yield remaining
                 return
             cut = self._find_forced_latency_cut(remaining, maxLength)
+            if cut <= 0:
+                cut = min(len(remaining), max(1, maxLength))
             segment = remaining[:cut].strip()
             if segment:
                 yield segment
-            remaining = remaining[cut:].strip()
+            nextRemaining = remaining[cut:].strip()
+            if nextRemaining == remaining:
+                yield remaining
+                return
+            remaining = nextRemaining
             firstYield = False
-
-    def _min_orphan_chars(self, text: str) -> int:
-        if self._no_space_script_segment_limit(text, SOFT_PHRASE_SEGMENT_MAX_CHARS) is not None:
-            return MIN_ORPHAN_NO_SPACE_CHARS
-        return MIN_ORPHAN_SPACE_CHARS
 
     def _iter_soft_phrase_segments(self, text: str, fastFirstSegment: bool) -> Iterator[str]:
         remaining = text.strip()
         firstSegment = fastFirstSegment
+        noSpaceTrigger = self._no_space_script_segment_limit(remaining, SOFT_PHRASE_SEGMENT_MAX_CHARS)
         noSpaceSegmentation = (
-            len(remaining) > SOFT_PHRASE_SEGMENT_MAX_CHARS
-            and self._no_space_script_segment_limit(remaining, SOFT_PHRASE_SEGMENT_MAX_CHARS) is not None
+            noSpaceTrigger is not None and len(remaining) > FAST_FIRST_PUNCTUATION_FREE_NO_SPACE_TRIGGER_CHARS
         )
         while (
             len(remaining) > SOFT_PHRASE_SEGMENT_MAX_CHARS
@@ -836,6 +1124,8 @@ class TextSegmenter:
                     and not self.looks_like_url_token(remaining)
                 ):
                     break
+            elif len(remaining) <= FAST_FIRST_PUNCTUATION_FREE_NO_SPACE_TRIGGER_CHARS and not firstSegment:
+                break
             if noSpaceLimit is not None and len(remaining) <= noSpaceLimit:
                 break
             isNoSpace = (
@@ -853,9 +1143,10 @@ class TextSegmenter:
                 and len(remaining) > FAST_FIRST_SEGMENT_TRIGGER_CHARS
                 and not self.looks_like_url_token(remaining)
             )
+            cut: int | None = None
             if noSpaceLimit is not None:
                 cut = self._find_no_space_script_cut(remaining, noSpaceLimit, minOrphanChars=minOrphan)
-            elif fastFirstCut:
+            if cut is None and fastFirstCut:
                 cut = self._find_soft_phrase_cut(remaining, True, minOrphanChars=minOrphan)
                 if cut is None:
                     if len(remaining) <= puncFreeTrigger:
@@ -870,7 +1161,7 @@ class TextSegmenter:
                     )
                 if cut is None and len(remaining) > puncFreeTrigger:
                     cut = self._find_forced_latency_cut(remaining, FAST_SOFT_PHRASE_SEGMENT_MAX_CHARS)
-            else:
+            elif cut is None:
                 cut = self._find_soft_phrase_cut(remaining, False, minOrphanChars=minOrphan)
                 if cut is None:
                     cut = self._find_whitespace_cut(
@@ -883,11 +1174,8 @@ class TextSegmenter:
                 if cut is None and len(remaining) > SOFT_PHRASE_SEGMENT_MAX_CHARS:
                     cut = self._find_forced_latency_cut(remaining, SOFT_PHRASE_SEGMENT_MAX_CHARS)
             if cut is None:
-                cut = self._extend_cut_over_combining_marks(
-                    remaining,
-                    min(len(remaining), FORCED_SEGMENT_HARD_MAX_CHARS),
-                    len(remaining),
-                )
+                cut = min(len(remaining), FORCED_SEGMENT_HARD_MAX_CHARS)
+            cut = self._extend_cut_over_combining_marks(remaining, cut, len(remaining))
             segment = remaining[:cut].strip()
             if segment:
                 yield segment
@@ -911,40 +1199,25 @@ class TextSegmenter:
             maxLength = min(len(text), FAST_SOFT_PHRASE_SEGMENT_MAX_CHARS)
             preferred = min(len(text), FAST_FIRST_PREFERRED_SOFT_CHARS)
             lookahead = FAST_SOFT_PHRASE_SEGMENT_LOOKAHEAD
-            if preferred > minLength:
-                for index in range(preferred, minLength - 1, -1):
-                    if (
-                        not minOrphanChars or len(text) - index >= minOrphanChars
-                    ) and self._is_contextual_soft_phrase_cut(text, index):
-                        return index
-            for index in range(maxLength, preferred, -1):
-                if (not minOrphanChars or len(text) - index >= minOrphanChars) and self._is_contextual_soft_phrase_cut(
-                    text, index
-                ):
-                    return index
-            lookaheadEnd = min(len(text), maxLength + lookahead)
-            for index in range(maxLength, lookaheadEnd):
-                candidate = index + 1
+            searchRanges = (
+                range(preferred, minLength - 1, -1) if preferred > minLength else (),
+                range(maxLength, preferred, -1),
+                range(maxLength + 1, min(len(text), maxLength + lookahead) + 1),
+            )
+        else:
+            minLength = min(len(text), SOFT_PHRASE_SEGMENT_MIN_CHARS)
+            maxLength = min(len(text), SOFT_PHRASE_SEGMENT_MAX_CHARS)
+            lookahead = SOFT_PHRASE_SEGMENT_LOOKAHEAD
+            searchRanges = (
+                range(maxLength, minLength - 1, -1),
+                range(maxLength + 1, min(len(text), maxLength + lookahead) + 1),
+            )
+        for indexRange in searchRanges:
+            for candidate in indexRange:
                 if (
                     not minOrphanChars or len(text) - candidate >= minOrphanChars
                 ) and self._is_contextual_soft_phrase_cut(text, candidate):
                     return candidate
-            return None
-        minLength = min(len(text), SOFT_PHRASE_SEGMENT_MIN_CHARS)
-        maxLength = min(len(text), SOFT_PHRASE_SEGMENT_MAX_CHARS)
-        lookahead = SOFT_PHRASE_SEGMENT_LOOKAHEAD
-        for index in range(maxLength, minLength - 1, -1):
-            if (not minOrphanChars or len(text) - index >= minOrphanChars) and self._is_contextual_soft_phrase_cut(
-                text, index
-            ):
-                return index
-        lookaheadEnd = min(len(text), maxLength + lookahead)
-        for index in range(maxLength, lookaheadEnd):
-            candidate = index + 1
-            if (not minOrphanChars or len(text) - candidate >= minOrphanChars) and self._is_contextual_soft_phrase_cut(
-                text, candidate
-            ):
-                return candidate
         return None
 
     def _find_whitespace_cut(
@@ -956,19 +1229,19 @@ class TextSegmenter:
         minOrphanChars: int = 0,
         preferredTarget: int | None = None,
     ) -> int | None:
-        minLength = min(len(text), minLength)
+        minLength = max(1, min(len(text), minLength))
         maxLength = min(len(text), maxLength)
         target = min(maxLength, preferredTarget) if preferredTarget is not None else maxLength
         for index in range(target, minLength - 1, -1):
-            if text[index - 1].isspace() and (not minOrphanChars or len(text) - index >= minOrphanChars):
+            if text[index - 1].isspace() and (not minOrphanChars or len(text[index:].lstrip()) >= minOrphanChars):
                 return index
         if target < maxLength:
             for index in range(target + 1, maxLength + 1):
-                if text[index - 1].isspace() and (not minOrphanChars or len(text) - index >= minOrphanChars):
+                if text[index - 1].isspace() and (not minOrphanChars or len(text[index:].lstrip()) >= minOrphanChars):
                     return index
         lookaheadEnd = min(len(text), maxLength + lookahead)
         for index in range(maxLength, lookaheadEnd):
-            if text[index].isspace() and (not minOrphanChars or len(text) - (index + 1) >= minOrphanChars):
+            if text[index].isspace() and (not minOrphanChars or len(text[index + 1 :].lstrip()) >= minOrphanChars):
                 return index
         return self._find_no_space_script_cut(text, maxLength, minOrphanChars=minOrphanChars)
 
@@ -977,6 +1250,7 @@ class TextSegmenter:
             return len(text)
         cut: int | None = None
         minLength = min(maxLength, max(FORCED_SEGMENT_MIN_CHARS, int(maxLength * 0.55)))
+        lookaheadEnd = min(len(text), maxLength + FORCED_SEGMENT_FORWARD_LOOKAHEAD)
         for index in range(maxLength, minLength - 1, -1):
             if self._is_contextual_soft_phrase_cut(text, index):
                 cut = index
@@ -987,7 +1261,6 @@ class TextSegmenter:
                     cut = index
                     break
         if cut is None:
-            lookaheadEnd = min(len(text), maxLength + FORCED_SEGMENT_FORWARD_LOOKAHEAD)
             for index in range(maxLength, lookaheadEnd):
                 if text[index].isspace():
                     cut = index
@@ -1039,13 +1312,15 @@ class TextSegmenter:
                 text, index
             ):
                 return index
-        cut = self._extend_cut_over_combining_marks(
-            text,
-            target,
-            min(len(text), maxLength + NO_SPACE_SCRIPT_COMBINING_LOOKAHEAD),
-        )
-        if minOrphanChars and len(text) - cut < minOrphanChars and len(text) <= maxLength:
-            return None
+        maxLookaheadCut = min(len(text), maxLength + NO_SPACE_SCRIPT_COMBINING_LOOKAHEAD)
+        cut = self._extend_cut_over_combining_marks(text, target, maxLookaheadCut)
+        if minOrphanChars and len(text) - cut < minOrphanChars:
+            if len(text) <= maxLength:
+                return None
+            if len(text) // 2 >= FORCED_SEGMENT_MIN_CHARS:
+                balancedCut = self._extend_cut_over_combining_marks(text, len(text) // 2, maxLookaheadCut)
+                if len(text) - balancedCut >= minOrphanChars:
+                    return balancedCut
         return cut
 
     def _no_space_script_segment_limit(self, text: str, maxLength: int) -> int | None:
@@ -1056,10 +1331,9 @@ class TextSegmenter:
         noSpaceCharacters = 0
         segmentLimit: int | None = None
         for character in sample:
-            category = unicodedata.category(character)
-            if category.startswith("L") or category.startswith("M"):
+            codepoint = ord(character)
+            if _is_letter_codepoint(codepoint) or _is_combining_mark(codepoint):
                 signalCharacters += 1
-                codepoint = ord(character)
                 rangeEntry = _find_no_space_range(codepoint)
                 if rangeEntry is not None:
                     noSpaceCharacters += 1
@@ -1074,20 +1348,29 @@ class TextSegmenter:
         return segmentLimit
 
     def _extend_cut_over_combining_marks(self, text: str, cut: int, maxCut: int) -> int:
-        while cut < maxCut:
-            ch = text[cut]
-            cp = ord(ch)
-            # Preserve UCD 17.0 combining marks, ZWNJ/ZWJ sequences, variation selectors, keycaps, tags, skin tone modifiers, and flag pairs
-            if (
-                _is_combining_mark(cp)
-                or cp in (0x200C, 0x200D, 0xFE0E, 0xFE0F, 0x20E3)
-                or (0x1F3FB <= cp <= 0x1F3FF)
-                or (0xE0020 <= cp <= 0xE007F)
-                or (0xE0100 <= cp <= 0xE01EF)
-                or (cut > 0 and ord(text[cut - 1]) == 0x200D)
-                or (0x1F1E6 <= cp <= 0x1F1FF and cut > 0 and 0x1F1E6 <= ord(text[cut - 1]) <= 0x1F1FF)
-            ):
+        textLen = len(text)
+        while cut < textLen:
+            cp = ord(text[cut])
+            # Preserve UCD combining marks, Grapheme_Cluster_Break=Extend (e.g. ZWNJ,
+            # halfwidth Kana sound marks, skin tones, tags), ZWJ sequences, and flag pairs
+            if _is_grapheme_extend_codepoint(cp) or cp == 0x200D or (cut > 0 and ord(text[cut - 1]) == 0x200D):
                 cut += 1
+            elif (
+                _in_codepoint_ranges(cp, _REGIONAL_INDICATOR_STARTS, REGIONAL_INDICATOR_RANGES)
+                and cut > 0
+                and _in_codepoint_ranges(ord(text[cut - 1]), _REGIONAL_INDICATOR_STARTS, REGIONAL_INDICATOR_RANGES)
+            ):
+                precedingFlags = 0
+                probe = cut - 1
+                while probe >= 0 and _in_codepoint_ranges(
+                    ord(text[probe]), _REGIONAL_INDICATOR_STARTS, REGIONAL_INDICATOR_RANGES
+                ):
+                    precedingFlags += 1
+                    probe -= 1
+                if precedingFlags % 2 == 1:
+                    cut += 1
+                else:
+                    break
             else:
                 break
         return cut
@@ -1095,21 +1378,29 @@ class TextSegmenter:
     def looks_like_url_token(self, text: str) -> bool:
         if not text or any(character.isspace() for character in text):
             return False
-        if "://" in text or "/" in text or "\\" in text:
+        if "://" in text:
             return True
-        if "@" in text and "." in text[text.find("@") :]:
-            return True
+        if "/" in text or "\\" in text:
+            cleanSlash = _strip_surrounding_wrappers(text, "()[]{}'\"“”«»`‘’.,;!?")
+            if "\\" in cleanSlash:
+                return True
+            if cleanSlash.startswith("/") or cleanSlash.count("/") >= 2:
+                parts = [p for p in cleanSlash.split("/") if p]
+                if not all(p.isdigit() for p in parts):
+                    return True
+            if any(ch in cleanSlash for ch in ("?", "&", "=", "#")):
+                return True
+            firstPart = cleanSlash.split("/", 1)[0]
+            return "." in firstPart and self.looks_like_url_token(firstPart)
+        clean = _strip_surrounding_wrappers(text, "'\"`.,;!?")
+        if "@" in clean:
+            localPart, _, domainPart = clean.partition("@")
+            if localPart and "." in domainPart and not domainPart.startswith(".") and not domainPart.endswith("."):
+                return True
         if ":" in text:
             scheme, rest = text.split(":", 1)
-            if (
-                len(scheme) >= 2
-                and scheme[0].isalpha()
-                and scheme.isascii()
-                and all(ch.isalnum() or ch in "+-." for ch in scheme)
-                and bool(rest)
-            ):
+            if scheme.lower() in _URL_SCHEMES and bool(rest):
                 return True
-        clean = _strip_surrounding_wrappers(text, "()[]{}'\"“”«»`‘’.,;!?")
         if "." in clean:
             parts = clean.split(".")
             if (
@@ -1117,7 +1408,7 @@ class TextSegmenter:
                 and all(bool(p) and p.isascii() and all(ch.isalnum() or ch in "-_" for ch in p) for p in parts)
                 and len(parts[-1]) >= 2
                 and parts[-1].isalpha()
-                and parts[-1].islower()
+                and (parts[-1].islower() or all(p.isupper() or p.isdigit() or "-" in p or "_" in p for p in parts))
                 and any(len(p) >= 3 for p in parts)
             ):
                 return True
@@ -1129,14 +1420,22 @@ class TextSegmenter:
         after = text[index] if index < len(text) else ""
         if before.isdigit() and after.isdigit():
             return False
-        if _is_colon_like_character(character) and character == ":" and after in "/\\":
-            if index == 2 and text[0].isalpha():
+        if character == ":":
+            if after in "/\\" and index == 2 and text[0].isalpha():
                 return False
-            schemeStart = index - 2
-            while schemeStart >= 0 and (text[schemeStart].isalnum() or text[schemeStart] in "+-."):
-                schemeStart -= 1
-            scheme = text[schemeStart + 1 : index - 1]
-            if scheme and scheme[0].isalpha() and text[index : index + 2] == "//":
+            tokenStart = index - 1
+            while tokenStart > 0 and not text[tokenStart - 1].isspace():
+                tokenStart -= 1
+            tokenEnd = index
+            while tokenEnd < len(text) and not text[tokenEnd].isspace():
+                tokenEnd += 1
+            token = text[tokenStart:tokenEnd]
+            scheme = _strip_surrounding_wrappers(text[tokenStart : index - 1], "'\"`").lower()
+            if scheme and scheme.split(":", 1)[0] in _URL_SCHEMES and after and not after.isspace():
+                return False
+            if after in "/\\" and scheme and scheme[0].isalpha() and text[index : index + 2] == "//":
+                return False
+            if self.looks_like_url_token(token):
                 return False
         return not (_is_dash_like_character(character) and _is_word_character(before) and _is_word_character(after))
 
@@ -1145,27 +1444,35 @@ class TextSegmenter:
             return False
         character = text[index - 1]
         if character in ASCII_SENTENCE_TERMINATORS:
+            afterIdx = self._extend_cut_over_combining_marks(text, index, len(text))
             return (
-                index < len(text)
-                and text[index].isspace()
-                and not self._sentence_terminator_stays_with_token(text, index - 1, index, character)
+                afterIdx < len(text)
+                and text[afterIdx].isspace()
+                and not self._sentence_terminator_stays_with_token(text, index - 1, afterIdx, character)
             )
         return _is_soft_break_character(character) and self._is_forced_soft_break(text, index)
 
+    @staticmethod
+    def _rstrip_space_and_variation_selectors(text: str) -> str:
+        end = len(text)
+        while end > 0 and (text[end - 1].isspace() or text[end - 1] in "\ufe0e\ufe0f"):
+            end -= 1
+        return text[:end]
+
     def should_pause_after_segment(self, segment: str) -> bool:
-        stripped = segment.rstrip()
+        stripped = self._rstrip_space_and_variation_selectors(segment)
         while stripped and _is_sentence_trailing_closer(stripped[-1]):
-            stripped = stripped[:-1].rstrip()
+            stripped = self._rstrip_space_and_variation_selectors(stripped[:-1])
         return bool(stripped) and _is_sentence_terminator_character(stripped[-1])
 
     def ends_with_pause_punctuation(self, text: str) -> bool:
-        stripped = text.rstrip()
+        stripped = self._rstrip_space_and_variation_selectors(text)
         if not stripped:
             return False
-        if stripped[-1] in ")(":
+        if stripped[-1] in ")(（）":
             return True
         while stripped and _is_sentence_trailing_closer(stripped[-1]):
-            stripped = stripped[:-1].rstrip()
+            stripped = self._rstrip_space_and_variation_selectors(stripped[:-1])
         if not stripped:
             return False
         lastChar = stripped[-1]

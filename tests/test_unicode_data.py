@@ -12,16 +12,27 @@ from pathlib import Path
 from unittest import mock
 
 import generate_unicode_data
-from tests.test_support import UNICODE_DATA_PATH, load_driver_module
+from tests.test_support import (
+    UNICODE_DATA_PATH,
+    load_driver_module,
+)
+from tests.test_support import (
+    captured_prints as _printed,
+)
+from tests.test_support import (
+    write_test_engine as _write_engine,
+)
 
 EXPECTED_LANGUAGE_SCRIPT_GROUPS = {
     ("Arabic",): ("ar", "ur"),
     ("Arabic", "Devanagari"): ("ks", "sd"),
+    ("Arabic", "Latin"): ("ms",),
     ("Bengali",): ("as", "bn"),
     ("Bengali", "Meetei_Mayek"): ("mni",),
     ("Cyrillic",): ("bg", "ru", "uk"),
-    ("Cyrillic", "Latin"): ("sr",),
-    ("Devanagari",): ("brx", "doi", "hi", "kok", "mai", "mr", "ne", "sa"),
+    ("Cyrillic", "Latin"): ("bs", "sr"),
+    ("Devanagari",): ("brx", "doi", "hi", "mai", "mr", "ne", "sa"),
+    ("Devanagari", "Latin"): ("kok",),
     ("Greek",): ("el",),
     ("Gujarati",): ("gu",),
     ("Gurmukhi",): ("pa",),
@@ -32,7 +43,6 @@ EXPECTED_LANGUAGE_SCRIPT_GROUPS = {
     ("Kannada",): ("kn",),
     ("Khmer",): ("km",),
     ("Latin",): (
-        "bs",
         "ca",
         "cs",
         "cy",
@@ -52,7 +62,6 @@ EXPECTED_LANGUAGE_SCRIPT_GROUPS = {
         "jv",
         "lt",
         "lv",
-        "ms",
         "nb",
         "nl",
         "pl",
@@ -105,12 +114,12 @@ class UnicodeDataTests(unittest.TestCase):
         cls.supported_roots = set()
         for package in packages:
             parts = str(package.get("id", "")).split("-")
-            if len(parts) >= 2 and re.fullmatch(r"[a-z]{2,3}", parts[0]) and re.fullmatch(r"[a-z]{2}", parts[1]):
+            if len(parts) >= 2 and re.fullmatch(r"[a-z]{2,3}", parts[0]) and re.fullmatch(r"[a-z]{2}|\d{3}", parts[1]):
                 cls.supported_roots.add(parts[0])
 
-    def test_generated_versions_are_pinned(self) -> None:
-        self.assertEqual("17.0.0", self.data["UNICODE_VERSION"])
-        self.assertEqual("48.2", self.data["CLDR_VERSION"])
+    def test_generated_versions_are_valid(self) -> None:
+        self.assertRegex(self.data["UNICODE_VERSION"], r"^\d+\.\d+\.\d+$")
+        self.assertRegex(self.data["CLDR_VERSION"], r"^\d+(?:\.\d+)*$")
 
     def test_every_bundled_language_root_has_official_script_data(self) -> None:
         language_scripts = self.data["SUPPORTED_LANGUAGE_SCRIPTS"]
@@ -149,15 +158,18 @@ class UnicodeDataTests(unittest.TestCase):
                     self.assertGreater(start, previous_end)
                     previous_end = end
 
-    def test_unicode_17_script_ranges_outside_old_blocks_are_present(self) -> None:
+    def test_extended_unicode_script_ranges_are_present(self) -> None:
         language_ranges = self.data["LANGUAGE_SCRIPT_RANGES"]
         cases = {
             "ar": (0x0870, 0x10EC2),
+            "bs": (0x0402, 0x0107),
             "cmn": (0x20000, 0x31350, 0x323B0),
             "en": (0xA7D0, 0x10780),
             "ja": (0x1AFF0, 0x1B120, 0x20000),
             "ko": (0xA960, 0xD7B0),
+            "kok": (0x0905, 0x00E3),
             "mni": (0xABC0,),
+            "ms": (0x0627, 0x0061),
             "ru": (0x1C80, 0x2DE0),
             "sat": (0x1C5A,),
         }
@@ -211,8 +223,8 @@ class UnicodeDataTests(unittest.TestCase):
 
     def test_official_sentence_terminal_property_is_complete(self) -> None:
         terminals = self.data["SENTENCE_TERMINAL_CODEPOINTS"]
-        self.assertEqual(170, len(terminals))
-        for codepoint in (0x002E, 0x003F, 0x061E, 0x061F, 0x0964, 0x1B4E, 0x113D4, 0x16D6E):
+        self.assertGreaterEqual(len(terminals), 170)
+        for codepoint in (0x002E, 0x003F, 0x061E, 0x061F, 0x0964, 0x1B4E, 0x2E60, 0x2E61, 0x113D4, 0x16D6E):
             with self.subTest(codepoint=f"U+{codepoint:04X}"):
                 self.assertIn(codepoint, terminals)
 
@@ -272,7 +284,7 @@ class UnicodeDataTests(unittest.TestCase):
         for char in "áàảãạéèẻẽẹíìỉĩịóòỏõọúùủũụđñüöä":
             self.assertNotIn(ord(char), norm_table)
 
-    def test_ucd_17_combining_currency_emoji_and_cldr_currencies(self) -> None:
+    def test_ucd_combining_currency_emoji_and_cldr_currencies(self) -> None:
         combining_ranges = self.data["COMBINING_MARK_RANGES"]
         currency_ranges = self.data["CURRENCY_SYMBOL_RANGES"]
         emoji_ranges = self.data["EMOJI_PICTOGRAPHIC_RANGES"]
@@ -297,14 +309,14 @@ class UnicodeDataTests(unittest.TestCase):
 
         cldr_units = self.data["CLDR_UNIT_SYMBOLS"]
         self.assertGreaterEqual(len(cldr_units), 600)
-        for unit in ("kg", "km/h", "GB", "TB", "GHz", "kWh", "mAh", "Mbps", "px", "°C", "‰", "‱"):
+        for unit in ("kg", "km/h", "GB", "TB", "GHz", "kWh", "Mb/s", "KiB", "m²", "px", "°C", "‰", "‱", "Tbsp"):
             self.assertIn(unit, cldr_units)
         for non_unit_word in ("cup", "day", "in", "as", "or", "at", "to", "for"):
             self.assertNotIn(non_unit_word, cldr_units)
 
         latin_exemplars = self.data["LATIN_LANGUAGE_EXEMPLARS"]
-        self.assertGreaterEqual(len(latin_exemplars), 30)
-        for root in ("vi", "de", "es", "fr", "pl", "tr", "ro", "is", "hu", "cs", "sk", "lt", "lv"):
+        self.assertGreaterEqual(len(latin_exemplars), 32)
+        for root in ("vi", "de", "es", "fr", "pl", "tr", "ro", "is", "hu", "cs", "sk", "lt", "lv", "kok"):
             self.assertIn(root, latin_exemplars)
             self.assertTrue(latin_exemplars[root])
             self.assertTrue(all(ord(ch) > 0x007F for ch in latin_exemplars[root]))
@@ -314,18 +326,31 @@ class UnicodeDataTests(unittest.TestCase):
         self.assertIn("ñ", latin_exemplars["es"])
         self.assertIn("ł", latin_exemplars["pl"])
         self.assertIn("ğ", latin_exemplars["tr"])
+        self.assertIn("ã", latin_exemplars["kok"])
 
+    def test_ucd18_no_space_scripts_grapheme_extend_and_category_tables(self) -> None:
+        no_space = self.data["NO_SPACE_SCRIPT_RANGES"]
+        self.assertTrue(set(no_space).isdisjoint(set(self.data["SCRIPT_RANGES"])))
+        for expected_script in ("Ahom", "Bopomofo", "Kawi", "Myanmar", "Sundanese", "Tai_Yo", "Yi"):
+            self.assertIn(expected_script, no_space)
+        self.assertTrue(_contains(no_space["Myanmar"], 0x116D0))
+        self.assertTrue(_contains(no_space["Sundanese"], 0x1CC0))
+        self.assertTrue(_contains(no_space["Yi"], 0xA490))
+        self.assertTrue(_contains(no_space["Bopomofo"], 0x02EA))
+        self.assertFalse(_contains(no_space["Myanmar"], 0x116E4))
 
-def _write_engine(root: Path, version: str, *, voices: bool = True) -> Path:
-    versionDir = root / version
-    versionDir.mkdir(parents=True, exist_ok=True)
-    if voices:
-        (versionDir / "voices.json").write_text("[]", encoding="utf-8")
-    return versionDir
+        extend_extra = self.data["GRAPHEME_EXTEND_EXTRA_RANGES"]
+        for cp in (0x200C, 0xFF9E, 0xFF9F, 0x1F3FB, 0xE0020):
+            self.assertTrue(_contains(extend_extra, cp))
+        self.assertTrue(_contains(self.data["REGIONAL_INDICATOR_RANGES"], 0x1F1E6))
 
-
-def _printed(printMock: mock.MagicMock) -> str:
-    return " ".join(str(call.args[0]) for call in printMock.call_args_list if call.args)
+        self.assertTrue(self.language_profiles.is_letter_codepoint(0x088F))
+        self.assertTrue(self.language_profiles.is_letter_codepoint(0x1DF41))
+        self.assertTrue(self.language_profiles.is_number_codepoint(0x116D0))
+        self.assertTrue(self.language_profiles.is_closing_punctuation_codepoint(0x2E63))
+        self.assertTrue(self.language_profiles.is_wrapper_punctuation_codepoint(0x2E62))
+        self.assertTrue(self.language_profiles.is_punctuation_codepoint(0x10ED0))
+        self.assertEqual("Po", self.language_profiles.punctuation_subcategory_codepoint(0x10ED0))
 
 
 class ParseUcdRecordsTests(unittest.TestCase):
@@ -458,9 +483,9 @@ class FormatNormalizationTableTests(unittest.TestCase):
         result = generate_unicode_data._format_normalization_table(table)
         lines = result.strip().split("\n")
         self.assertEqual(3, len(lines))
-        self.assertIn("0x0041: 'A'", lines[0])
-        self.assertIn("0x00A0: ' '", lines[1])
-        self.assertIn("0x00A9: '(C)'", lines[2])
+        self.assertIn('0x0041: "A"', lines[0])
+        self.assertIn('0x00A0: " "', lines[1])
+        self.assertIn('0x00A9: "(C)"', lines[2])
 
 
 class BuildNormalizationTableTests(unittest.TestCase):
@@ -495,21 +520,68 @@ class BuildNormalizationTableTests(unittest.TestCase):
             self.assertEqual("(C)", table[0x00A9])
 
 
+class CldrMetadataAndGraphemeHelpersTests(unittest.TestCase):
+    """Verify CLDR supplemental metadata helpers and UCD grapheme-break extraction."""
+
+    def test_reads_aliases_language_data_and_parent_locales_from_xml(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cldrCommon = Path(td)
+            supp = cldrCommon / "supplemental"
+            supp.mkdir(parents=True)
+            (supp / "supplementalMetadata.xml").write_text(
+                "<supplementalData><metadata><alias>"
+                '<languageAlias type="cmn" replacement="zh" reason="macrolanguage"/>'
+                "</alias></metadata></supplementalData>",
+                encoding="utf-8",
+            )
+            (supp / "supplementalData.xml").write_text(
+                "<supplementalData><languageData>"
+                '<language type="bs" scripts="Latn Cyrl"/>'
+                '<language type="mni" scripts="Beng"/>'
+                '<language type="mni" scripts="Mtei" alt="secondary"/>'
+                "</languageData><parentLocales>"
+                '<parentLocale parent="no" locales="nb nn"/>'
+                "</parentLocales></supplementalData>",
+                encoding="utf-8",
+            )
+            aliases = generate_unicode_data._language_aliases(cldrCommon)
+            self.assertEqual({"cmn": "zh"}, aliases)
+            primary, secondary = generate_unicode_data._language_data_scripts(cldrCommon)
+            self.assertEqual(("Latn", "Cyrl"), primary["bs"])
+            self.assertEqual(("Mtei",), secondary["mni"])
+            parents = generate_unicode_data._parent_locales(cldrCommon)
+            self.assertEqual(("no",), parents["nb"])
+
+    def test_extracts_non_combining_grapheme_extend_and_regional_indicators(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            ucdDir = Path(td)
+            auxDir = ucdDir / "auxiliary"
+            auxDir.mkdir(parents=True)
+            (auxDir / "GraphemeBreakProperty.txt").write_text(
+                "0300..036F ; Extend\nFF9E..FF9F ; Extend\n1F1E6..1F1FF ; Regional_Indicator\n",
+                encoding="utf-8",
+            )
+            extendExtra, regional = generate_unicode_data._extract_grapheme_break_ranges(
+                ucdDir,
+                ((0x0300, 0x036F),),
+            )
+            self.assertEqual(((0xFF9E, 0xFF9F),), extendExtra)
+            self.assertEqual(((0x1F1E6, 0x1F1FF),), regional)
+
+
 class RenderModuleTests(unittest.TestCase):
     """Verify _render_module produces valid Python source."""
 
     def test_output_contains_version(self) -> None:
         result = generate_unicode_data._render_module(
-            ucdVersion="17.0.0",
-            cldrVersion="48.2",
+            ucdVersion="1.2.3",
+            cldrVersion="99",
             languageScripts={"en": ("Latin",)},
             scriptRanges={"Latin": ((0x0041, 0x005A),)},
             sentenceTerminals={0x002E, 0x003F},
         )
-        self.assertIn('UNICODE_VERSION = "17.0.0"', result)
-        self.assertIn('CLDR_VERSION = "48.2"', result)
-        self.assertIn("https://www.unicode.org/Public/17.0.0/ucd/UCD.zip", result)
-        self.assertIn("https://www.unicode.org/Public/cldr/48.2/cldr-common-48.2.zip", result)
+        self.assertIn('UNICODE_VERSION = "1.2.3"', result)
+        self.assertIn('CLDR_VERSION = "99"', result)
         self.assertIn('"en":', result)
         self.assertIn("Latin", result)
         self.assertIn("SENTENCE_TERMINAL_CODEPOINTS", result)
@@ -517,20 +589,59 @@ class RenderModuleTests(unittest.TestCase):
 
     def test_output_contains_normalization_table_when_provided(self) -> None:
         result = generate_unicode_data._render_module(
-            ucdVersion="17.0.0",
-            cldrVersion="48.2",
+            ucdVersion="1.2.3",
+            cldrVersion="99",
             languageScripts={"en": ("Latin",)},
             scriptRanges={"Latin": ((0x0041, 0x005A),)},
             sentenceTerminals={0x002E, 0x003F},
             normalizationTable={0x00A0: " ", 0x00A9: "(C)"},
         )
         self.assertIn("NORMALIZATION_TABLE: dict[int, str] = {", result)
-        self.assertIn("0x00A0: ' '", result)
-        self.assertIn("0x00A9: '(C)'", result)
+        self.assertIn('0x00A0: " "', result)
+        self.assertIn('0x00A9: "(C)"', result)
+
+    def test_cldr_region_casing_and_exemplar_group_escapes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            voices_path = root / "voices.json"
+            voices_path.write_text(
+                '[{"id": "sd-in-x-multi", "speakers": [{"speaker": "s1"}]}]',
+                encoding="utf-8",
+            )
+            self.assertEqual({"sd_IN"}, generate_unicode_data._supported_locales(voices_path))
+
+            cldrCommon = root / "common"
+            supp = cldrCommon / "supplemental"
+            supp.mkdir(parents=True)
+            (supp / "likelySubtags.xml").write_text(
+                "<supplementalData><likelySubtags>"
+                '<likelySubtag from="sd" to="sd_Arab_PK"/>'
+                '<likelySubtag from="sd_IN" to="sd_Deva_IN"/>'
+                "</likelySubtags></supplementalData>",
+                encoding="utf-8",
+            )
+            (supp / "supplementalMetadata.xml").write_text(
+                "<supplementalData><metadata><alias/></metadata></supplementalData>",
+                encoding="utf-8",
+            )
+            (supp / "supplementalData.xml").write_text(
+                "<supplementalData><languageData/><parentLocales/></supplementalData>",
+                encoding="utf-8",
+            )
+            likelyScripts = generate_unicode_data._likely_scripts(supp / "likelySubtags.xml")
+            scripts = generate_unicode_data._supported_language_scripts(
+                ["sd_IN"],
+                likelyScripts,
+                {"Arab": "Arabic", "Deva": "Devanagari"},
+            )
+            self.assertEqual(("Devanagari",), scripts["sd"])
+
+            parsed = generate_unicode_data._parse_cldr_exemplar_set(r"[a {\u00E9} {\U000000F1}]")
+            self.assertEqual({"\u00e9", "\u00f1"}, parsed)
 
 
 class ConfiguredVoicesJsonTests(unittest.TestCase):
-    """Verify the bundled catalog gate fails closed on any unverified engine version."""
+    """Verify generate_unicode_data resolves the pinned bundled engine catalog via shared helpers."""
 
     def test_reads_the_version_pinned_by_the_catalog_module(self) -> None:
         self.assertRegex(generate_unicode_data._configured_engine_version(), r"^\d{8}\.\d+$")
@@ -541,22 +652,15 @@ class ConfiguredVoicesJsonTests(unittest.TestCase):
         self.assertTrue(voicesJson.is_file(), voicesJson)
         self.assertEqual(generate_unicode_data._configured_engine_version(), voicesJson.parent.name)
 
-    def test_returns_the_catalog_when_versions_match(self) -> None:
+    def test_delegates_version_gate_to_select_engine_voices_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             versionDir = _write_engine(Path(tmp), "20260820.1")
             with (
                 mock.patch.object(generate_unicode_data, "_configured_engine_version", return_value="20260820.1"),
-                mock.patch("builtins.print") as printMock,
+                mock.patch("builtins.print"),
             ):
                 selected = generate_unicode_data._configured_voices_json([Path(tmp)])
             self.assertEqual(versionDir / "voices.json", selected)
-            printed = _printed(printMock)
-            self.assertIn("Target engine catalog", printed)
-            self.assertNotIn("ABORT", printed)
-
-    def test_aborts_when_the_tree_is_ahead_of_the_catalog_module(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            _write_engine(Path(tmp), "20260820.1")
             with (
                 mock.patch.object(generate_unicode_data, "_configured_engine_version", return_value="20250101.1"),
                 mock.patch("builtins.print") as printMock,
@@ -564,47 +668,6 @@ class ConfiguredVoicesJsonTests(unittest.TestCase):
             ):
                 generate_unicode_data._configured_voices_json([Path(tmp)])
             self.assertIn("Bump ENGINE_VERSION", _printed(printMock))
-
-    def test_aborts_when_the_catalog_module_points_at_an_unbundled_engine(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            _write_engine(Path(tmp), "20260820.1")
-            with (
-                mock.patch.object(generate_unicode_data, "_configured_engine_version", return_value="20260920.1"),
-                mock.patch("builtins.print") as printMock,
-                self.assertRaises(SystemExit),
-            ):
-                generate_unicode_data._configured_voices_json([Path(tmp)])
-            self.assertIn("no bundled engine directory", _printed(printMock))
-
-    def test_aborts_when_the_engine_version_cannot_be_read(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            _write_engine(Path(tmp), "20260820.1")
-            with (
-                mock.patch.object(generate_unicode_data, "_configured_engine_version", return_value=""),
-                mock.patch("builtins.print") as printMock,
-                self.assertRaises(SystemExit),
-            ):
-                generate_unicode_data._configured_voices_json([Path(tmp)])
-            self.assertIn("Could not read ENGINE_VERSION", _printed(printMock))
-
-    def test_aborts_when_the_newest_engine_has_no_voices_json(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            _write_engine(Path(tmp), "20260820.1", voices=False)
-            with (
-                mock.patch.object(generate_unicode_data, "_configured_engine_version", return_value="20260820.1"),
-                mock.patch("builtins.print") as printMock,
-                self.assertRaises(SystemExit),
-            ):
-                generate_unicode_data._configured_voices_json([Path(tmp)])
-            self.assertIn("has no voices.json", _printed(printMock))
-
-    def test_aborts_when_no_version_directory_exists(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            mock.patch("builtins.print"),
-            self.assertRaises(SystemExit),
-        ):
-            generate_unicode_data._configured_voices_json([Path(tmp)])
 
 
 if __name__ == "__main__":

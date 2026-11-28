@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import ModuleType
 
-from tests.test_support import DRIVER_DIR, ROOT, load_driver_module
+from tests.test_support import DRIVER_DIR, ROOT, load_driver_module, load_fresh_driver_module
 
 VENDORED_WEBSOCKET_ROOT = DRIVER_DIR / "websocketClientRepo" / "websocket"
 GLOBAL_PLUGIN_DIR = ROOT / "googleTtsForNvda" / "globalPlugins" / "googleTtsForNvda"
@@ -44,6 +44,17 @@ NVDA_ONLY_MODULES = (
 )
 
 
+def _iter_imported_module_roots(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+    roots: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.extend(alias.name.partition(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            roots.append(node.module.partition(".")[0])
+    return roots
+
+
 class BundledDependencyIsolationTests(unittest.TestCase):
     def test_bridge_ignores_foreign_top_level_websocket_module(self) -> None:
         foreignWebSocket = ModuleType("websocket")
@@ -51,7 +62,7 @@ class BundledDependencyIsolationTests(unittest.TestCase):
         previousWebSocket = sys.modules.get("websocket")
         sys.modules["websocket"] = foreignWebSocket
         try:
-            bridge = load_driver_module("bridge")
+            bridge = load_fresh_driver_module("bridge")
         finally:
             if previousWebSocket is None:
                 sys.modules.pop("websocket", None)
@@ -63,23 +74,13 @@ class BundledDependencyIsolationTests(unittest.TestCase):
         self.assertIsNot(bridge.websocket, foreignWebSocket)
         self.assertTrue(loadedPath.is_relative_to(vendoredRoot), loadedPath)
         self.assertTrue(bridge.websocket.__name__.endswith(".websocketClientRepo.websocket"))
-
-        websocketHttp = sys.modules[f"{bridge.websocket.__name__}._http"]
-        self.assertFalse(websocketHttp.HAVE_PYTHON_SOCKS)
+        self.assertFalse(bridge.websocket._http.HAVE_PYTHON_SOCKS)
 
     def test_vendored_websocket_has_no_third_party_absolute_imports(self) -> None:
         for path in VENDORED_WEBSOCKET_ROOT.rglob("*.py"):
             with self.subTest(path=path.relative_to(DRIVER_DIR)):
-                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-                for node in ast.walk(tree):
-                    if isinstance(node, ast.Import):
-                        moduleRoots = {alias.name.partition(".")[0] for alias in node.names}
-                    elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                        moduleRoots = {node.module.partition(".")[0]}
-                    else:
-                        continue
-                    for moduleRoot in moduleRoots:
-                        self.assertIn(moduleRoot, sys.stdlib_module_names)
+                for moduleRoot in _iter_imported_module_roots(path):
+                    self.assertIn(moduleRoot, sys.stdlib_module_names)
 
     def test_bundled_websocket_fallbacks_preserve_core_behavior(self) -> None:
         bridge = load_driver_module("bridge")
@@ -92,6 +93,47 @@ class BundledDependencyIsolationTests(unittest.TestCase):
         self.assertTrue(websocketUtils.validate_utf8("Tiếng Việt".encode()))
         self.assertFalse(websocketUtils.validate_utf8(b"\xff"))
 
+    def test_vendored_websocket_proxy_info_honors_http_no_proxy_without_explicit_proxy_host(self) -> None:
+        import os
+        from unittest import mock
+
+        bridge = load_driver_module("bridge")
+        websocketPrefix = bridge.websocket.__name__
+        websocketHttp = sys.modules[f"{websocketPrefix}._http"]
+        websocketUrl = sys.modules[f"{websocketPrefix}._url"]
+        with mock.patch.dict(
+            os.environ,
+            {"HTTP_PROXY": "http://proxy.invalid:8080", "http_proxy": "http://proxy.invalid:8080"},
+            clear=False,
+        ):
+            os.environ.pop("NO_PROXY", None)
+            os.environ.pop("no_proxy", None)
+            noProxyInfo = websocketHttp.proxy_info(http_no_proxy=["127.0.0.1", "localhost", "::1"])
+            self.assertEqual(["127.0.0.1", "localhost", "::1"], noProxyInfo.no_proxy)
+            self.assertEqual(
+                (None, 0, None),
+                websocketUrl.get_proxy_info(
+                    "127.0.0.1",
+                    False,
+                    noProxyInfo.proxy_host,
+                    noProxyInfo.proxy_port,
+                    noProxyInfo.auth,
+                    noProxyInfo.no_proxy,
+                ),
+            )
+            defaultProxyInfo = websocketHttp.proxy_info()
+            self.assertEqual(
+                ("proxy.invalid", 8080, None),
+                websocketUrl.get_proxy_info(
+                    "127.0.0.1",
+                    False,
+                    defaultProxyInfo.proxy_host,
+                    defaultProxyInfo.proxy_port,
+                    defaultProxyInfo.auth,
+                    defaultProxyInfo.no_proxy,
+                ),
+            )
+
     def test_driver_internal_modules_use_package_relative_imports(self) -> None:
         self._assert_internal_modules_use_relative_imports(DRIVER_DIR, DRIVER_INTERNAL_MODULES)
 
@@ -99,7 +141,7 @@ class BundledDependencyIsolationTests(unittest.TestCase):
         self._assert_internal_modules_use_relative_imports(GLOBAL_PLUGIN_DIR, GLOBAL_PLUGIN_INTERNAL_MODULES)
 
     def test_pure_driver_modules_have_no_nvda_dependencies(self) -> None:
-        for driverModuleName in ("language_profiles", "speech_processing"):
+        for driverModuleName in ("audio_math", "language_profiles", "language_utils", "speech_processing"):
             module = load_driver_module(driverModuleName)
             for moduleName in NVDA_ONLY_MODULES:
                 with self.subTest(driverModule=driverModuleName, dependency=moduleName):
@@ -112,18 +154,11 @@ class BundledDependencyIsolationTests(unittest.TestCase):
     ) -> None:
         for path in moduleDirectory.glob("*.py"):
             with self.subTest(path=path.name):
-                tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
-                for node in ast.walk(tree):
-                    if isinstance(node, ast.Import):
-                        moduleRoots = {alias.name.partition(".")[0] for alias in node.names}
-                    elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                        moduleRoots = {node.module.partition(".")[0]}
-                    else:
-                        continue
-                    self.assertTrue(
-                        internalModuleNames.isdisjoint(moduleRoots),
-                        f"{path.name} imports an internal module through the shared top-level namespace: {moduleRoots}",
-                    )
+                moduleRoots = set(_iter_imported_module_roots(path))
+                self.assertTrue(
+                    internalModuleNames.isdisjoint(moduleRoots),
+                    f"{path.name} imports an internal module through the shared top-level namespace: {moduleRoots}",
+                )
 
     def test_cld2_candidates_are_anchored_to_the_driver_directory(self) -> None:
         languageDetector = load_driver_module("language_detector")

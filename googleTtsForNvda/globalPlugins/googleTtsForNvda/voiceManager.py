@@ -1,236 +1,46 @@
 from __future__ import annotations
 
+import contextlib
+import http.client
 import json
 import os
+import socket
+import ssl
 import threading
-import unicodedata
 import urllib.error
 from collections import Counter
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 import addonHandler
 import config
-import gui
-import languageHandler
 import synthDriverHandler
 import ui
 import wx
 from gui import nvdaControls
-from logHandler import log
+from synthDrivers.googleTtsForNvda import audio_math, language_utils, standby, voice_store
 from synthDrivers.googleTtsForNvda import bridge as browserBridge
-from synthDrivers.googleTtsForNvda import language_utils, standby, voice_store
 from synthDrivers.googleTtsForNvda.catalog import VoiceCatalog, VoicePackage, is_package_supported_by_engine
 
-from .uiUtils import format_size_mb, open_synthesizer_dialog
+from .uiUtils import (
+    call_compat as _call_compat,
+)
+from .uiUtils import (
+    dialog_parent,
+    format_size_mb,
+    is_google_synth_current,
+    open_synthesizer_dialog,
+    show_message_box,
+    step_after_synth_switch,
+    stop_call_later,
+    window_is_alive,
+)
+
+log = language_utils.get_nvda_logger()
 
 addonHandler.initTranslation()
 
 SYNTH_NAME = browserBridge.SYNTH_NAME
-BASE_DIR = Path(__file__).resolve().parents[2]
-LOCALE_DIR = BASE_DIR / "locale"
-_languageSortRulesByLocale: dict[str, dict[str, Any] | None] = {}
-
-LANGUAGE_NAMES: dict[str, str] = {
-    "ar-XA": _("Arabic"),
-    "as-IN": _("Assamese"),
-    "bg-BG": _("Bulgarian"),
-    "bn-BD": _("Bengali (Bangladesh)"),
-    "bn-IN": _("Bengali (India)"),
-    "brx-IN": _("Bodo"),
-    "bs-BA": _("Bosnian"),
-    "ca-ES": _("Catalan"),
-    "cmn-CN": _("Mandarin Chinese (China)"),
-    "cmn-TW": _("Mandarin Chinese (Taiwan)"),
-    "cs-CZ": _("Czech"),
-    "cy-GB": _("Welsh"),
-    "da-DK": _("Danish"),
-    "de-DE": _("German"),
-    "doi-IN": _("Dogri"),
-    "el-GR": _("Greek"),
-    "en-AU": _("English (Australia)"),
-    "en-GB": _("English (UK)"),
-    "en-IN": _("English (India)"),
-    "en-NG": _("English (Nigeria)"),
-    "en-US": _("English (US)"),
-    "es-ES": _("Spanish (Spain)"),
-    "es-US": _("Spanish (US)"),
-    "et-EE": _("Estonian"),
-    "fi-FI": _("Finnish"),
-    "fil-PH": _("Filipino"),
-    "fr-CA": _("French (Canada)"),
-    "fr-FR": _("French (France)"),
-    "gu-IN": _("Gujarati"),
-    "he-IL": _("Hebrew"),
-    "hi-IN": _("Hindi"),
-    "hr-HR": _("Croatian"),
-    "hu-HU": _("Hungarian"),
-    "id-ID": _("Indonesian"),
-    "is-IS": _("Icelandic"),
-    "it-IT": _("Italian"),
-    "ja-JP": _("Japanese"),
-    "jv-ID": _("Javanese"),
-    "km-KH": _("Khmer"),
-    "kn-IN": _("Kannada"),
-    "ko-KR": _("Korean"),
-    "kok-IN": _("Konkani"),
-    "ks-IN": _("Kashmiri"),
-    "lt-LT": _("Lithuanian"),
-    "lv-LV": _("Latvian"),
-    "mai-IN": _("Maithili"),
-    "ml-IN": _("Malayalam"),
-    "mni-IN": _("Manipuri"),
-    "mr-IN": _("Marathi"),
-    "ms-MY": _("Malay"),
-    "nb-NO": _("Norwegian Bokmål"),
-    "ne-NP": _("Nepali"),
-    "nl-BE": _("Flemish"),
-    "nl-NL": _("Dutch"),
-    "or-IN": _("Odia"),
-    "pa-IN": _("Punjabi"),
-    "pl-PL": _("Polish"),
-    "pt-BR": _("Portuguese (Brazil)"),
-    "pt-PT": _("Portuguese (Portugal)"),
-    "ro-RO": _("Romanian"),
-    "ru-RU": _("Russian"),
-    "sa-IN": _("Sanskrit"),
-    "sat-IN": _("Santali"),
-    "sd-IN": _("Sindhi"),
-    "si-LK": _("Sinhala"),
-    "sk-SK": _("Slovak"),
-    "sl-SI": _("Slovenian"),
-    "sq-AL": _("Albanian"),
-    "sr-RS": _("Serbian"),
-    "su-ID": _("Sundanese"),
-    "sv-SE": _("Swedish"),
-    "sw-KE": _("Swahili"),
-    "ta-IN": _("Tamil"),
-    "te-IN": _("Telugu"),
-    "th-TH": _("Thai"),
-    "tr-TR": _("Turkish"),
-    "uk-UA": _("Ukrainian"),
-    "ur-IN": _("Urdu (India)"),
-    "ur-PK": _("Urdu (Pakistan)"),
-    "vi-VN": _("Vietnamese"),
-    "yue-HK": _("Cantonese"),
-}
-
-
-def get_nvda_locale_for_language(lang_code: str | None) -> str:
-    return language_utils.get_nvda_locale_for_language(lang_code)
-
-
-def get_language_display_name(lang_code: str) -> str:
-    return language_utils.get_language_display_name(lang_code, custom_language_names=LANGUAGE_NAMES)
-
-
-def _current_ui_language() -> str:
-    try:
-        return languageHandler.getLanguage().replace("-", "_").lower()
-    except Exception:
-        return ""
-
-
-def _locale_candidates(language: str) -> list[str]:
-    if not language:
-        return []
-    candidates = [language]
-    rootLanguage = language.split("_", 1)[0]
-    if rootLanguage != language:
-        candidates.append(rootLanguage)
-    return candidates
-
-
-def _language_sort_rules_for_current_ui() -> dict[str, Any] | None:
-    for localeName in _locale_candidates(_current_ui_language()):
-        rules = _load_language_sort_rules(localeName)
-        if rules is not None:
-            return rules
-    return None
-
-
-def _load_language_sort_rules(localeName: str) -> dict[str, Any] | None:
-    if localeName in _languageSortRulesByLocale:
-        return _languageSortRulesByLocale[localeName]
-    path = LOCALE_DIR / localeName / "languageSort.json"
-    try:
-        rawRules = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        _languageSortRulesByLocale[localeName] = None
-        return None
-    except Exception:
-        log.debug("Could not load Google TTS language sort rules from %s.", path, exc_info=True)
-        _languageSortRulesByLocale[localeName] = None
-        return None
-    rules = _normalize_language_sort_rules(rawRules)
-    _languageSortRulesByLocale[localeName] = rules
-    return rules
-
-
-def _normalize_language_sort_rules(rawRules: Any) -> dict[str, Any] | None:
-    if not isinstance(rawRules, dict):
-        return None
-    rawLetterOrder = rawRules.get("letterOrder")
-    if not isinstance(rawLetterOrder, list) or not rawLetterOrder:
-        return None
-    letterOrder: dict[str, str] = {}
-    for index, item in enumerate(rawLetterOrder):
-        if not isinstance(item, str) or not item:
-            return None
-        letter = unicodedata.normalize("NFC", _strip_combining_marks(item.casefold(), set()))
-        letterOrder[letter] = f"{index:04d}"
-    stripPrefixes = tuple(prefix for prefix in rawRules.get("stripPrefixes", []) if isinstance(prefix, str) and prefix)
-    ignoredMarks = _combining_marks_from_names(rawRules.get("ignoreCombiningMarks", []))
-    return {
-        "letterOrder": letterOrder,
-        "stripPrefixes": stripPrefixes,
-        "ignoredMarks": ignoredMarks,
-    }
-
-
-def _combining_marks_from_names(markNames: Any) -> set[str]:
-    marks: set[str] = set()
-    if not isinstance(markNames, list):
-        return marks
-    for name in markNames:
-        if not isinstance(name, str):
-            continue
-        normalizedName = name.upper()
-        try:
-            marks.add(unicodedata.lookup(f"COMBINING {normalizedName}"))
-        except KeyError:
-            try:
-                marks.add(unicodedata.lookup(f"COMBINING {normalizedName} ACCENT"))
-            except KeyError:
-                log.debug("Ignoring unknown Google TTS language sort combining mark: %s", name)
-    return marks
-
-
-def _strip_combining_marks(value: str, marks: set[str]) -> str:
-    if not marks:
-        return value
-    return "".join(char for char in unicodedata.normalize("NFD", value) if char not in marks)
-
-
-def _rule_based_visible_sort_key(displayName: str, rules: dict[str, Any]) -> tuple[str, str]:
-    ignoredMarks = rules["ignoredMarks"]
-    sortName = unicodedata.normalize("NFC", _strip_combining_marks(displayName.casefold(), ignoredMarks))
-    for prefix in rules["stripPrefixes"]:
-        normalizedPrefix = unicodedata.normalize("NFC", _strip_combining_marks(prefix.casefold(), ignoredMarks))
-        if sortName.startswith(normalizedPrefix):
-            sortName = sortName[len(normalizedPrefix) :].lstrip()
-            break
-    letterOrder = rules["letterOrder"]
-    normalizedLetters = "".join(letterOrder.get(char, char) for char in sortName)
-    return (normalizedLetters, sortName)
-
-
-def _visible_language_sort_key(displayName: str) -> tuple[str, str]:
-    rules = _language_sort_rules_for_current_ui()
-    if rules is not None:
-        return _rule_based_visible_sort_key(displayName, rules)
-    return (displayName.casefold(), displayName)
 
 
 def _language_codes_for_display(packages: list[VoicePackage]) -> list[str]:
@@ -242,8 +52,9 @@ def _language_codes_for_display(packages: list[VoicePackage]) -> list[str]:
             continue
         seen.add(normalizedCode)
         codes.append(package.language)
-    if _language_sort_rules_for_current_ui() is not None:
-        codes.sort(key=lambda code: _visible_language_sort_key(get_language_display_name(code)))
+    codes.sort(
+        key=lambda code: language_utils.visible_language_sort_key(language_utils.get_language_display_name(code))
+    )
     return codes
 
 
@@ -257,9 +68,9 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
         super().__init__(
             parent,
             title=_("Google TTS Voice Manager"),
-            size=(880, 640),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
+        scaleSize = getattr(self, "scaleSize", lambda value: value)
         self._onDestroy = onDestroy
         self.catalog = VoiceCatalog.load()
         self.installedPackages: list[VoicePackage] = []
@@ -270,11 +81,15 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
         self._allUsableInstalledPackageIds: set[str] = set()
         self._allDownloadPackages: list[VoicePackage] = []
         self.isBusy = False
+        self._closing = False
+        self._bulkChecking = False
         self._pendingRemoveAfterSynthSwitch: list[VoicePackage] | None = None
+        self._pendingRemoveTimer: Any = None
         self._initialPage = initialPage
         self._lastProgressAnnouncement = -1
         self._build_ui()
-        self.SetMinSize((720, 520))
+        self.SetSize(scaleSize((880, 640)))
+        self.SetMinSize(scaleSize((720, 520)))
         self.SetEscapeId(wx.ID_CLOSE)
         self.Bind(wx.EVT_CHAR_HOOK, self.on_char_hook)
         self.Bind(wx.EVT_CLOSE, self.on_close)
@@ -321,65 +136,82 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
         buttonRow.Add(self.closeButton)
         root.Add(buttonRow, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
 
-    def _build_installed_tab(self) -> None:
+    def _build_package_tab(
+        self,
+        panel: wx.Panel,
+        *,
+        filterComboName: str,
+        onFilterChanged: Callable[[wx.CommandEvent], None],
+        onSelectAll: Callable[[wx.CommandEvent], None],
+        listName: str,
+        onItemCheckChanged: Callable[[wx.ListEvent], None],
+        actionLabel: str,
+        onAction: Callable[[wx.CommandEvent], None],
+    ) -> tuple[wx.StaticText, wx.Choice, wx.CheckBox, wx.ListCtrl, wx.Button]:
         sizer = wx.BoxSizer(wx.VERTICAL)
-        self.installedPanel.SetSizer(sizer)
+        panel.SetSizer(sizer)
 
         filterRow = wx.BoxSizer(wx.HORIZONTAL)
-        self.installedFilterLabel = wx.StaticText(self.installedPanel, label=_("&Filter by language:"))
-        self.installedLanguageCombo = wx.Choice(self.installedPanel)
-        self.installedLanguageCombo.SetName(_("Filter installed voice packages by language"))
-        self.installedLanguageCombo.Bind(wx.EVT_CHOICE, self.on_installed_language_filter_changed)
-        filterRow.Add(self.installedFilterLabel, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
-        filterRow.Add(self.installedLanguageCombo, 1, wx.ALIGN_CENTER_VERTICAL)
+        filterLabel = wx.StaticText(panel, label=_("&Filter by language:"))
+        languageCombo = wx.Choice(panel)
+        languageCombo.SetName(filterComboName)
+        languageCombo.Bind(wx.EVT_CHOICE, onFilterChanged)
+        filterRow.Add(filterLabel, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        filterRow.Add(languageCombo, 1, wx.ALIGN_CENTER_VERTICAL)
         sizer.Add(filterRow, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
 
-        self.installedSelectAllCheck = wx.CheckBox(
-            self.installedPanel,
-            label=_("Check &all voice packages"),
-        )
-        self.installedSelectAllCheck.Bind(wx.EVT_CHECKBOX, self.on_installed_select_all)
-        sizer.Add(self.installedSelectAllCheck, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
-        self.installedList = self._create_list(self.installedPanel, includeStatus=True)
-        self.installedList.SetName(_("Installed voice packages"))
-        self.installedList.Bind(wx.EVT_LIST_ITEM_CHECKED, self._on_installed_item_check_changed)
-        self.installedList.Bind(wx.EVT_LIST_ITEM_UNCHECKED, self._on_installed_item_check_changed)
-        sizer.Add(self.installedList, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
+        selectAllCheck = wx.CheckBox(panel, label=_("Check &all voice packages"))
+        selectAllCheck.Bind(wx.EVT_CHECKBOX, onSelectAll)
+        sizer.Add(selectAllCheck, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
+
+        listCtrl = self._create_list(panel, includeStatus=True)
+        listCtrl.SetName(listName)
+        listCtrl.Bind(wx.EVT_LIST_ITEM_CHECKED, onItemCheckChanged)
+        listCtrl.Bind(wx.EVT_LIST_ITEM_UNCHECKED, onItemCheckChanged)
+        sizer.Add(listCtrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
+
         buttonRow = wx.BoxSizer(wx.HORIZONTAL)
-        self.removeButton = wx.Button(self.installedPanel, label=_("&Remove checked voice packages"))
-        self.removeButton.Bind(wx.EVT_BUTTON, self.on_remove_selected)
-        buttonRow.Add(self.removeButton)
+        actionButton = wx.Button(panel, label=actionLabel)
+        actionButton.Bind(wx.EVT_BUTTON, onAction)
+        buttonRow.Add(actionButton)
         sizer.Add(buttonRow, 0, wx.EXPAND | wx.ALL, 8)
+        return filterLabel, languageCombo, selectAllCheck, listCtrl, actionButton
+
+    def _build_installed_tab(self) -> None:
+        (
+            self.installedFilterLabel,
+            self.installedLanguageCombo,
+            self.installedSelectAllCheck,
+            self.installedList,
+            self.removeButton,
+        ) = self._build_package_tab(
+            self.installedPanel,
+            filterComboName=_("Filter installed voice packages by language"),
+            onFilterChanged=self.on_installed_language_filter_changed,
+            onSelectAll=self.on_installed_select_all,
+            listName=_("Installed voice packages"),
+            onItemCheckChanged=self._on_installed_item_check_changed,
+            actionLabel=_("&Remove checked voice packages"),
+            onAction=self.on_remove_selected,
+        )
 
     def _build_download_tab(self) -> None:
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        self.downloadPanel.SetSizer(sizer)
-
-        filterRow = wx.BoxSizer(wx.HORIZONTAL)
-        self.downloadFilterLabel = wx.StaticText(self.downloadPanel, label=_("&Filter by language:"))
-        self.downloadLanguageCombo = wx.Choice(self.downloadPanel)
-        self.downloadLanguageCombo.SetName(_("Filter downloadable voice packages by language"))
-        self.downloadLanguageCombo.Bind(wx.EVT_CHOICE, self.on_download_language_filter_changed)
-        filterRow.Add(self.downloadFilterLabel, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
-        filterRow.Add(self.downloadLanguageCombo, 1, wx.ALIGN_CENTER_VERTICAL)
-        sizer.Add(filterRow, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
-
-        self.downloadSelectAllCheck = wx.CheckBox(
+        (
+            self.downloadFilterLabel,
+            self.downloadLanguageCombo,
+            self.downloadSelectAllCheck,
+            self.downloadList,
+            self.downloadButton,
+        ) = self._build_package_tab(
             self.downloadPanel,
-            label=_("Check &all voice packages"),
+            filterComboName=_("Filter downloadable voice packages by language"),
+            onFilterChanged=self.on_download_language_filter_changed,
+            onSelectAll=self.on_download_select_all,
+            listName=_("Downloadable voice packages"),
+            onItemCheckChanged=self._on_download_item_check_changed,
+            actionLabel=_("&Download checked voice packages"),
+            onAction=self.on_download_selected,
         )
-        self.downloadSelectAllCheck.Bind(wx.EVT_CHECKBOX, self.on_download_select_all)
-        sizer.Add(self.downloadSelectAllCheck, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
-        self.downloadList = self._create_list(self.downloadPanel, includeStatus=True)
-        self.downloadList.SetName(_("Downloadable voice packages"))
-        self.downloadList.Bind(wx.EVT_LIST_ITEM_CHECKED, self._on_download_item_check_changed)
-        self.downloadList.Bind(wx.EVT_LIST_ITEM_UNCHECKED, self._on_download_item_check_changed)
-        sizer.Add(self.downloadList, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
-        buttonRow = wx.BoxSizer(wx.HORIZONTAL)
-        self.downloadButton = wx.Button(self.downloadPanel, label=_("&Download checked voice packages"))
-        self.downloadButton.Bind(wx.EVT_BUTTON, self.on_download_selected)
-        buttonRow.Add(self.downloadButton)
-        sizer.Add(buttonRow, 0, wx.EXPAND | wx.ALL, 8)
 
     def _create_list(self, parent: wx.Window, includeStatus: bool = False) -> wx.ListCtrl:
         listCtrl = wx.ListCtrl(parent, style=wx.LC_REPORT | wx.LC_HRULES | wx.LC_VRULES)
@@ -393,13 +225,14 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
         ]
         if includeStatus:
             columns.append((_("Status"), 180))
+        scaleSize = getattr(self, "scaleSize", lambda value: value)
         for index, (label, width) in enumerate(columns):
-            listCtrl.InsertColumn(index, label, width=width)
+            listCtrl.InsertColumn(index, label, width=int(scaleSize(width)))
         return listCtrl
 
     def _update_language_combo(self, combo: wx.Choice, packages: list[VoicePackage]) -> None:
         unique_codes = _language_codes_for_display(packages)
-        display_names = [_("All")] + [get_language_display_name(code) for code in unique_codes]
+        display_names = [_("All")] + [language_utils.get_language_display_name(code) for code in unique_codes]
 
         oldIdx = combo.GetSelection()
         oldSelectionCode = ""
@@ -415,39 +248,24 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
             newIdx = unique_codes.index(oldSelectionCode) + 1
         combo.SetSelection(newIdx)
 
-    def _apply_installed_filter(self) -> None:
-        idx = self.installedLanguageCombo.GetSelection()
-        if (
-            idx <= 0
-            or not hasattr(self.installedLanguageCombo, "_langCodes")
-            or idx > len(self.installedLanguageCombo._langCodes)
-        ):
-            self.installedPackages = list(self._allInstalledPackages)
+    def _filter_packages_by_combo(self, combo: wx.Choice, allPackages: list[VoicePackage]) -> list[VoicePackage]:
+        idx = combo.GetSelection()
+        langCodes = getattr(combo, "_langCodes", None)
+        if idx <= 0 or not langCodes or idx > len(langCodes):
+            filtered = list(allPackages)
         else:
-            target_code = self.installedLanguageCombo._langCodes[idx - 1]
-            self.installedPackages = [
-                pkg for pkg in self._allInstalledPackages if pkg.language.lower() == target_code.lower()
-            ]
-        if _language_sort_rules_for_current_ui() is not None:
-            self.installedPackages.sort(key=self._visible_package_sort_key)
+            targetCode = langCodes[idx - 1].lower()
+            filtered = [pkg for pkg in allPackages if pkg.language.lower() == targetCode]
+        filtered.sort(key=self._visible_package_sort_key)
+        return filtered
+
+    def _apply_installed_filter(self) -> None:
+        self.installedPackages = self._filter_packages_by_combo(self.installedLanguageCombo, self._allInstalledPackages)
         self._populate_installed_list()
         self._refresh_buttons()
 
     def _apply_download_filter(self) -> None:
-        idx = self.downloadLanguageCombo.GetSelection()
-        if (
-            idx <= 0
-            or not hasattr(self.downloadLanguageCombo, "_langCodes")
-            or idx > len(self.downloadLanguageCombo._langCodes)
-        ):
-            self.downloadPackages = list(self._allDownloadPackages)
-        else:
-            target_code = self.downloadLanguageCombo._langCodes[idx - 1]
-            self.downloadPackages = [
-                pkg for pkg in self._allDownloadPackages if pkg.language.lower() == target_code.lower()
-            ]
-        if _language_sort_rules_for_current_ui() is not None:
-            self.downloadPackages.sort(key=self._visible_package_sort_key)
+        self.downloadPackages = self._filter_packages_by_combo(self.downloadLanguageCombo, self._allDownloadPackages)
         self._populate_download_list()
         self._refresh_buttons()
 
@@ -457,7 +275,13 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
     def on_download_language_filter_changed(self, evt: wx.CommandEvent) -> None:
         self._apply_download_filter()
 
+    def _clear_pending_remove(self) -> None:
+        self._pendingRemoveAfterSynthSwitch = None
+        stop_call_later(getattr(self, "_pendingRemoveTimer", None))
+        self._pendingRemoveTimer = None
+
     def refresh_lists(self, announce: bool = False) -> None:
+        self._clear_pending_remove()
         self._allInstalledPackages = voice_store.physically_installed_packages(self.catalog)
         self._allInstalledPackageIds = {pkg.id for pkg in self._allInstalledPackages}
         self._allUsableInstalledPackages = voice_store.usable_installed_packages(self._allInstalledPackages)
@@ -486,10 +310,14 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
             self.set_status(summary, 0, announce=True)
 
     def focus_default_control(self) -> None:
-        if self._initialPage == "download":
-            self.show_download_tab()
+        if self._closing or not window_is_alive(self):
             return
-        self._focus_active_page()
+        with contextlib.suppress(RuntimeError):
+            if self._initialPage == "download":
+                self._initialPage = "installed"
+                self.show_download_tab()
+                return
+            self._focus_active_page()
 
     def show_download_tab(self) -> None:
         self.notebook.SetSelection(1)
@@ -538,46 +366,55 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
             return
         evt.Skip()
 
-    def _populate_installed_list(self) -> None:
-        self.installedList.Freeze()
+    def _populate_package_list(
+        self,
+        listCtrl: wx.ListCtrl,
+        packages: list[VoicePackage],
+        allPackages: list[VoicePackage],
+        statusFn: Callable[[VoicePackage, int], str],
+        selectAllCheck: wx.CheckBox,
+    ) -> None:
+        listCtrl.Freeze()
         try:
-            self.installedList.DeleteAllItems()
+            listCtrl.DeleteAllItems()
             dependentCounts = Counter(
-                installedPackage.dependentVoiceId
-                for installedPackage in self._allInstalledPackages
-                if installedPackage.dependentVoiceId
+                pkg.dependentVoiceId
+                for pkg in allPackages
+                if pkg.dependentVoiceId and is_package_supported_by_engine(pkg)
             )
-            for index, package in enumerate(self.installedPackages):
-                status = self._installed_package_status(package, dependentCounts.get(package.id, 0))
-                self._insert_package_row(self.installedList, index, package, status)
-            if self.installedList.ItemCount:
-                self.installedList.Select(0)
+            for index, package in enumerate(packages):
+                status = statusFn(package, dependentCounts.get(package.id, 0))
+                self._insert_package_row(listCtrl, index, package, status)
+            if listCtrl.ItemCount:
+                listCtrl.Select(0)
             # Reset the select-all toggle when list contents change.
-            self.installedSelectAllCheck.SetValue(False)
+            selectAllCheck.SetValue(False)
         finally:
-            self.installedList.Thaw()
+            listCtrl.Thaw()
+
+    def _populate_installed_list(self) -> None:
+        self._populate_package_list(
+            self.installedList,
+            self.installedPackages,
+            self._allInstalledPackages,
+            self._installed_package_status,
+            self.installedSelectAllCheck,
+        )
 
     def _populate_download_list(self) -> None:
-        self.downloadList.Freeze()
-        try:
-            self.downloadList.DeleteAllItems()
-            dependentCounts = Counter(
-                downloadPackage.dependentVoiceId
-                for downloadPackage in self._allDownloadPackages
-                if downloadPackage.dependentVoiceId and is_package_supported_by_engine(downloadPackage)
-            )
-            for index, package in enumerate(self.downloadPackages):
-                status = self._download_package_status(package, dependentCounts.get(package.id, 0))
-                self._insert_package_row(self.downloadList, index, package, status)
-            if self.downloadList.ItemCount:
-                self.downloadList.Select(0)
-            # Reset the select-all toggle when list contents change.
-            self.downloadSelectAllCheck.SetValue(False)
-        finally:
-            self.downloadList.Thaw()
+        self._populate_package_list(
+            self.downloadList,
+            self.downloadPackages,
+            self._allDownloadPackages,
+            self._download_package_status,
+            self.downloadSelectAllCheck,
+        )
 
     def _visible_package_sort_key(self, package: VoicePackage) -> tuple[tuple[str, str], str]:
-        return (_visible_language_sort_key(get_language_display_name(package.language)), package.id)
+        return (
+            language_utils.visible_language_sort_key(language_utils.get_language_display_name(package.language)),
+            package.id,
+        )
 
     def _insert_package_row(
         self,
@@ -586,7 +423,7 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
         package: VoicePackage,
         status: str | Callable[[VoicePackage], str] | None = None,
     ) -> None:
-        listCtrl.InsertItem(index, get_language_display_name(package.language))
+        listCtrl.InsertItem(index, language_utils.get_language_display_name(package.language))
         listCtrl.SetItem(index, 1, package.id)
         listCtrl.SetItem(index, 2, self._speaker_names(package))
         listCtrl.SetItem(index, 3, self._format_size(package.compressedSize))
@@ -594,19 +431,18 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
             statusText = status(package) if callable(status) else status
             listCtrl.SetItem(index, 4, statusText)
 
-    def _direct_installed_dependents(self, package: VoicePackage) -> list[VoicePackage]:
+    def _direct_dependents(self, package: VoicePackage, sourcePackages: list[VoicePackage]) -> list[VoicePackage]:
         return [
-            installedPackage
-            for installedPackage in self._allInstalledPackages
-            if installedPackage.dependentVoiceId == package.id
+            candidate
+            for candidate in sourcePackages
+            if candidate.dependentVoiceId == package.id and is_package_supported_by_engine(candidate)
         ]
 
+    def _direct_installed_dependents(self, package: VoicePackage) -> list[VoicePackage]:
+        return self._direct_dependents(package, self._allInstalledPackages)
+
     def _direct_download_dependents(self, package: VoicePackage) -> list[VoicePackage]:
-        return [
-            downloadPackage
-            for downloadPackage in self._allDownloadPackages
-            if downloadPackage.dependentVoiceId == package.id and is_package_supported_by_engine(downloadPackage)
-        ]
+        return self._direct_dependents(package, self._allDownloadPackages)
 
     def _installed_package_status(self, package: VoicePackage, dependentCount: int | None = None) -> str:
         if not is_package_supported_by_engine(package):
@@ -766,17 +602,23 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
         return bool(self._allUsableInstalledPackages) and not self._usable_packages_after_removal(packages)
 
     def _is_google_synth_current(self) -> bool:
-        try:
-            return getattr(synthDriverHandler.getSynth(), "name", "") == SYNTH_NAME
-        except Exception:
-            return False
+        return is_google_synth_current()
 
     def _open_synthesizer_dialog(self) -> bool:
         return open_synthesizer_dialog(self, title=_("Google TTS Voice Manager"))
 
+    def _confirm_yes_no(self, message: str, style: int = wx.YES_NO | wx.ICON_QUESTION) -> bool:
+        answer = show_message_box(
+            message,
+            _("Google TTS Voice Manager"),
+            style,
+            dialog_parent(self),
+        )
+        return answer in (wx.YES, getattr(wx, "ID_YES", wx.YES))
+
     def _confirm_remove_last_inactive_voice(self, packages: list[VoicePackage]) -> bool:
         packageNames = self._package_list_text(packages)
-        answer = gui.messageBox(
+        return self._confirm_yes_no(
             _(
                 "You are about to remove the last usable voice package. "
                 "After it is removed, Google TTS For NVDA will not have any voices available "
@@ -784,15 +626,12 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
                 "Packages to remove, including dependent packages: {packages}\n\n"
                 "Choose Yes to remove these packages. Choose No to keep them installed."
             ).format(packages=packageNames),
-            _("Google TTS Voice Manager"),
             wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
-            self,
         )
-        return answer == wx.YES
 
     def _confirm_remove_last_active_voice(self, packages: list[VoicePackage]) -> bool:
         packageNames = self._package_list_text(packages)
-        answer = gui.messageBox(
+        return self._confirm_yes_no(
             _(
                 "You are about to remove the last usable voice package. "
                 "Google TTS For NVDA is currently selected as your synthesizer, so it needs "
@@ -801,13 +640,11 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
                 "Choose Yes to open Select Synthesizer and switch first. "
                 "Choose No to keep this package installed."
             ).format(packages=packageNames),
-            _("Google TTS Voice Manager"),
             wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
-            self,
         )
-        return answer == wx.YES
 
     def _schedule_remove_after_synth_switch(self, packages: list[VoicePackage]) -> None:
+        self._clear_pending_remove()
         self._pendingRemoveAfterSynthSwitch = packages
         self.set_status(
             _("Waiting for you to switch away from Google TTS For NVDA before removing the last usable voice package."),
@@ -815,26 +652,33 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
             announce=True,
         )
         if self._open_synthesizer_dialog():
-            wx.CallLater(500, self._remove_after_synth_switch, packages, 0)
+            if self._pendingRemoveAfterSynthSwitch is packages:
+                self._pendingRemoveTimer = wx.CallLater(500, self._remove_after_synth_switch, packages, 0)
         else:
             self._pendingRemoveAfterSynthSwitch = None
 
     def _remove_after_synth_switch(self, packages: list[VoicePackage], attempts: int) -> None:
         if self._pendingRemoveAfterSynthSwitch is not packages:
             return
+        if self._closing or not window_is_alive(self):
+            self._clear_pending_remove()
+            return
         try:
             if not self.IsShown():
-                self._pendingRemoveAfterSynthSwitch = None
+                self._clear_pending_remove()
                 return
         except RuntimeError:
-            self._pendingRemoveAfterSynthSwitch = None
+            self._clear_pending_remove()
             return
-        if not self._is_google_synth_current():
+
+        def on_ready() -> None:
             self._pendingRemoveAfterSynthSwitch = None
+            self._pendingRemoveTimer = None
             self._remove_packages(packages)
-            return
-        if attempts >= 600:
+
+        def on_timeout() -> None:
             self._pendingRemoveAfterSynthSwitch = None
+            self._pendingRemoveTimer = None
             self.set_status(
                 _(
                     "The last usable voice package was kept because Google TTS For NVDA is still the current synthesizer."
@@ -842,8 +686,19 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
                 0,
                 announce=True,
             )
-            return
-        wx.CallLater(500, self._remove_after_synth_switch, packages, attempts + 1)
+
+        def retry(nextAttempts: int) -> None:
+            self._pendingRemoveTimer = wx.CallLater(500, self._remove_after_synth_switch, packages, nextAttempts)
+
+        step_after_synth_switch(
+            attempts,
+            isStillActive=lambda: self._pendingRemoveAfterSynthSwitch is packages,
+            isGoogleSynthCurrent=self._is_google_synth_current,
+            isBusy=lambda: self.isBusy,
+            onReady=on_ready,
+            onTimeout=on_timeout,
+            retry=retry,
+        )
 
     def _first_voice_id(self, packages: list[VoicePackage]) -> str | None:
         catalog = VoiceCatalog(packages)
@@ -855,78 +710,152 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
         return None
 
     def _reset_configured_voice_if_removed(self, removedPackageIds: set[str]) -> str | None:
+        if not removedPackageIds:
+            return None
         try:
             synthConfig = config.conf["speech"][SYNTH_NAME]
             configuredVoice = str(synthConfig.get("voice") or "")
             configuredVariant = str(synthConfig.get("variant") or "")
         except Exception:
             return None
+        usableCatalog = VoiceCatalog(self._allUsableInstalledPackages)
         removedPrefix = tuple(f"{packageId}:" for packageId in removedPackageIds)
-        if not configuredVariant.startswith(removedPrefix) and not configuredVoice.startswith(removedPrefix):
+        variantRemoved = configuredVariant.startswith(removedPrefix) or configuredVoice.startswith(removedPrefix)
+        variantUnusable = False
+        if usableCatalog.speakers and configuredVariant:
+            try:
+                usableCatalog.speaker_for_voice(configuredVariant)
+            except KeyError:
+                variantUnusable = True
+        languageRemoved = False
+        if usableCatalog.speakers and not configuredVariant and configuredVoice:
+            configuredKey = language_utils.normalize_language(configuredVoice)
+            languageRemoved = not any(
+                language_utils.normalize_language(lang) == configuredKey for lang in usableCatalog.voices_by_language()
+            )
+        if not variantRemoved and not variantUnusable and not languageRemoved:
             return None
         fallbackVoice = self._first_voice_id(self._allUsableInstalledPackages)
         if not fallbackVoice:
             return None
         fallbackLanguage = ""
         try:
-            fallbackLanguage = VoiceCatalog(self._allUsableInstalledPackages).language_for_voice(fallbackVoice)
+            fallbackLanguage = usableCatalog.language_for_voice(fallbackVoice)
         except Exception:
-            log.debug("Could not resolve fallback Google TTS voice language.", exc_info=True)
+            log.debugWarning("Could not resolve fallback Google TTS voice language.", exc_info=True)
         try:
             synthConfig["variant"] = fallbackVoice
             if fallbackLanguage:
                 synthConfig["voice"] = fallbackLanguage
         except Exception:
-            log.debug("Could not reset removed Google TTS configured voice.", exc_info=True)
+            log.debugWarning("Could not reset removed Google TTS configured voice.", exc_info=True)
             return None
         return fallbackVoice
 
-    def _reset_auto_language_profile_variants_if_removed(self, removedPackageIds: set[str]) -> int:
+    def _reset_auto_language_profile_variants_if_removed(self, removedPackageIds: set[str]) -> bool:
         if not removedPackageIds:
-            return 0
+            return False
         try:
             section = config.conf[browserBridge.CONFIG_SECTION]
-            rawProfiles = section[browserBridge.CONFIG_AUTO_LANGUAGE_PROFILES]
-            profiles = json.loads(str(rawProfiles or "{}"))
         except Exception:
-            return 0
-        if not isinstance(profiles, dict):
-            return 0
+            return False
+        profiles: dict[str, Any] | None = None
+        with contextlib.suppress(Exception):
+            rawProfiles = section[browserBridge.CONFIG_AUTO_LANGUAGE_PROFILES]
+            parsedProfiles = json.loads(str(rawProfiles or "{}"))
+            if isinstance(parsedProfiles, dict):
+                profiles = parsedProfiles
 
         removedPrefix = tuple(f"{packageId}:" for packageId in removedPackageIds)
         speakersByLanguage = VoiceCatalog(self._allUsableInstalledPackages).voices_by_language()
+        speakersByNormalizedLanguage = {
+            language_utils.normalize_language(lang): speakers for lang, speakers in speakersByLanguage.items()
+        }
         changedCount = 0
-        for rawLanguage, rawProfile in list(profiles.items()):
-            if not isinstance(rawProfile, dict):
-                continue
-            language = str(rawLanguage or "").strip().replace("_", "-")
-            speakers = speakersByLanguage.get(language, [])
-            validVoiceIds = {speaker.id for speaker in speakers}
-            voiceId = str(rawProfile.get("voice") or "")
-            voiceWasRemoved = voiceId.startswith(removedPrefix)
-            voiceIsInvalid = bool(validVoiceIds and voiceId and voiceId not in validVoiceIds)
-            if not voiceWasRemoved and not voiceIsInvalid:
-                continue
-            replacementVoice = speakers[0].id if speakers else ""
-            if replacementVoice == voiceId:
-                continue
-            profile = dict(rawProfile)
-            profile["voice"] = replacementVoice
-            profiles[rawLanguage] = profile
-            changedCount += 1
+        if profiles is not None:
+            for rawLanguage, rawProfile in list(profiles.items()):
+                if not isinstance(rawProfile, dict):
+                    continue
+                language = language_utils.normalize_language_code(str(rawLanguage or ""))
+                speakers = speakersByLanguage.get(language) or speakersByNormalizedLanguage.get(
+                    language_utils.normalize_language(language),
+                    [],
+                )
+                validVoiceIds = {speaker.id for speaker in speakers}
+                voiceId = str(rawProfile.get("voice") or "")
+                voiceWasRemoved = voiceId.startswith(removedPrefix)
+                voiceIsInvalid = bool(voiceId and voiceId not in validVoiceIds)
+                if not voiceWasRemoved and not voiceIsInvalid and (speakers or not rawProfile.get("enabled", False)):
+                    continue
+                replacementVoice = speakers[0].id if speakers else ""
+                profile = dict(rawProfile)
+                updated = False
+                if replacementVoice != voiceId:
+                    profile["voice"] = replacementVoice
+                    updated = True
+                if not speakers and profile.get("enabled", False):
+                    profile["enabled"] = False
+                    updated = True
+                if updated:
+                    profiles[rawLanguage] = profile
+                    changedCount += 1
 
-        if not changedCount:
-            return 0
         try:
-            section[browserBridge.CONFIG_AUTO_LANGUAGE_PROFILES] = json.dumps(
-                profiles,
-                ensure_ascii=False,
-                sort_keys=True,
+            rawCandidates = str(section.get(browserBridge.CONFIG_AUTO_LANGUAGE_CANDIDATES, "") or "")
+        except Exception:
+            rawCandidates = ""
+        parsedCandidates = language_utils.parse_language_codes(rawCandidates)
+        filteredCandidates = [
+            candidate
+            for candidate in parsedCandidates
+            if (
+                speakersByLanguage.get(candidate)
+                or speakersByNormalizedLanguage.get(language_utils.normalize_language(candidate))
+            )
+        ]
+        try:
+            preferred = language_utils.normalize_language_code(
+                str(section.get(browserBridge.CONFIG_AUTO_LANGUAGE_PREFERRED, "") or "")
             )
         except Exception:
-            log.debug("Could not reset removed Google TTS automatic language profile variants.", exc_info=True)
-            return 0
-        return changedCount
+            preferred = ""
+        preferredKey = language_utils.normalize_language(preferred)
+        matchedPreferred = next(
+            (
+                candidate
+                for candidate in filteredCandidates
+                if language_utils.normalize_language(candidate) == preferredKey
+            ),
+            "",
+        )
+        newPreferred = matchedPreferred or (filteredCandidates[0] if filteredCandidates else "")
+        try:
+            rawDetection = section.get(browserBridge.CONFIG_AUTO_LANGUAGE_DETECTION, False)
+            detectionEnabled = audio_math.coerce_bool(rawDetection, False)
+        except Exception:
+            detectionEnabled = False
+        disableDetection = detectionEnabled and not filteredCandidates
+        candidatesChanged = filteredCandidates != parsedCandidates
+        preferredChanged = newPreferred != preferred
+        if not changedCount and not candidatesChanged and not preferredChanged and not disableDetection:
+            return False
+        try:
+            if changedCount and profiles is not None:
+                section[browserBridge.CONFIG_AUTO_LANGUAGE_PROFILES] = json.dumps(
+                    profiles,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            if candidatesChanged:
+                section[browserBridge.CONFIG_AUTO_LANGUAGE_CANDIDATES] = ",".join(filteredCandidates)
+            if preferredChanged:
+                section[browserBridge.CONFIG_AUTO_LANGUAGE_PREFERRED] = newPreferred
+            if disableDetection:
+                section[browserBridge.CONFIG_AUTO_LANGUAGE_DETECTION] = False
+        except Exception:
+            log.debugWarning("Could not reset removed Google TTS automatic language profile variants.", exc_info=True)
+            return False
+        return bool(disableDetection or changedCount or candidatesChanged or preferredChanged)
 
     def _apply_reset_voice_to_current_synth(self, voiceId: str) -> None:
         try:
@@ -942,7 +871,34 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
             if hasattr(currentSynth, "variant"):
                 currentSynth.variant = voiceId
         except Exception:
-            log.debug("Could not apply reset Google TTS voice to current synth.", exc_info=True)
+            log.debugWarning("Could not apply reset Google TTS voice to current synth.", exc_info=True)
+
+    def _refresh_current_google_synth_catalog(self, reloadSettingsAndRing: bool = False) -> bool:
+        try:
+            currentSynth = synthDriverHandler.getSynth()
+            if getattr(currentSynth, "name", "") != SYNTH_NAME:
+                return False
+            refreshed = False
+            refreshCatalog = getattr(currentSynth, "refresh_installed_catalog", None)
+            if callable(refreshCatalog):
+                refreshed = bool(refreshCatalog())
+            if reloadSettingsAndRing:
+                loadSettings = getattr(currentSynth, "loadSettings", None)
+                if callable(loadSettings):
+                    with contextlib.suppress(Exception):
+                        _call_compat(loadSettings, onlyChanged=True)
+                try:
+                    import globalVars
+
+                    settingsRing = getattr(globalVars, "settingsRing", None)
+                    if settingsRing is not None:
+                        settingsRing.updateSupportedSettings(currentSynth)
+                except Exception:
+                    log.debugWarning("Could not refresh Google TTS settings ring.", exc_info=True)
+            return refreshed
+        except Exception:
+            log.debugWarning("Could not refresh Google TTS live synth catalog after package change.", exc_info=True)
+        return False
 
     def _warm_current_google_synth_voice(self) -> None:
         try:
@@ -953,13 +909,29 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
             if callable(warmCurrentVoice):
                 warmCurrentVoice()
         except Exception:
-            log.debug("Could not warm Google TTS voice after package change.", exc_info=True)
+            log.debugWarning("Could not warm Google TTS voice after package change.", exc_info=True)
 
     def _refresh_standby_google_synth_runtime(self) -> None:
         try:
             standby.refresh_async("Google TTS voice packages changed")
         except Exception:
-            log.debug("Could not refresh Google TTS standby browser runtime after package change.", exc_info=True)
+            log.debugWarning(
+                "Could not refresh Google TTS standby browser runtime after package change.", exc_info=True
+            )
+
+    def _sync_download_select_all_checkbox(self) -> None:
+        count = self.downloadList.ItemCount
+        if count == 0 or not hasattr(self.downloadList, "IsItemChecked"):
+            self.downloadSelectAllCheck.SetValue(False)
+            return
+        supportedIndices = [
+            i
+            for i in range(count)
+            if i < len(self.downloadPackages) and is_package_supported_by_engine(self.downloadPackages[i])
+        ]
+        self.downloadSelectAllCheck.SetValue(
+            bool(supportedIndices) and all(self.downloadList.IsItemChecked(i) for i in supportedIndices)
+        )
 
     def _on_check_all(
         self,
@@ -970,25 +942,36 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
     ) -> None:
         if not hasattr(listCtrl, "CheckItem"):
             return
-        for i in range(listCtrl.ItemCount):
-            if check and packages is not None and allowPackage is not None and i < len(packages):
-                if not allowPackage(packages[i]):
-                    listCtrl.CheckItem(i, False)
-                    continue
-            listCtrl.CheckItem(i, check)
+        self._bulkChecking = True
+        try:
+            for i in range(listCtrl.ItemCount):
+                if check and packages is not None and allowPackage is not None and i < len(packages):
+                    if not allowPackage(packages[i]):
+                        listCtrl.CheckItem(i, False)
+                        continue
+                listCtrl.CheckItem(i, check)
+        finally:
+            self._bulkChecking = False
 
     def on_installed_select_all(self, evt: wx.CommandEvent) -> None:
         """Toggle all checkboxes in the installed list to match the select-all checkbox."""
         self._on_check_all(self.installedList, evt.IsChecked())
+        count = self.installedList.ItemCount
+        if count > 0 and hasattr(self.installedList, "IsItemChecked"):
+            self.installedSelectAllCheck.SetValue(all(self.installedList.IsItemChecked(i) for i in range(count)))
 
     def on_download_select_all(self, evt: wx.CommandEvent) -> None:
         """Toggle all checkboxes in the download list to match the select-all checkbox."""
         self._on_check_all(self.downloadList, evt.IsChecked(), self.downloadPackages, is_package_supported_by_engine)
+        self._sync_download_select_all_checkbox()
 
     def _on_installed_item_check_changed(self, evt: wx.ListEvent) -> None:
         """Keep the select-all checkbox in sync when individual items are toggled."""
+        if getattr(self, "_bulkChecking", False):
+            evt.Skip()
+            return
         count = self.installedList.ItemCount
-        if count == 0:
+        if count == 0 or not hasattr(self.installedList, "IsItemChecked"):
             return
         all_checked = all(self.installedList.IsItemChecked(i) for i in range(count))
         self.installedSelectAllCheck.SetValue(all_checked)
@@ -996,13 +979,15 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
 
     def _on_download_item_check_changed(self, evt: wx.ListEvent) -> None:
         """Keep the select-all checkbox in sync when individual items are toggled."""
+        if getattr(self, "_bulkChecking", False):
+            evt.Skip()
+            return
         count = self.downloadList.ItemCount
-        if count == 0:
+        if count == 0 or not hasattr(self.downloadList, "IsItemChecked"):
             return
         index = evt.GetIndex()
         if (
             0 <= index < len(self.downloadPackages)
-            and hasattr(self.downloadList, "IsItemChecked")
             and hasattr(self.downloadList, "CheckItem")
             and self.downloadList.IsItemChecked(index)
             and not is_package_supported_by_engine(self.downloadPackages[index])
@@ -1011,9 +996,7 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
             self.set_status(
                 _("This voice package is not supported by the bundled Google TTS engine."), 0, announce=True
             )
-            return
-        all_checked = all(self.downloadList.IsItemChecked(i) for i in range(count))
-        self.downloadSelectAllCheck.SetValue(all_checked)
+        self._sync_download_select_all_checkbox()
         evt.Skip()
 
     def on_download_selected(self, evt: wx.CommandEvent) -> None:
@@ -1042,13 +1025,7 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
                 selected=self._package_list_text([pkg for pkg in packages if pkg.id in selectedDownloadIds]),
                 dependencies=self._package_list_text(requiredPackages),
             )
-            answer = gui.messageBox(
-                confirmMsg,
-                _("Google TTS Voice Manager"),
-                wx.YES_NO | wx.ICON_QUESTION,
-                self,
-            )
-            if answer != wx.YES:
+            if not self._confirm_yes_no(confirmMsg):
                 return
         totalCount = len(packages)
         catalogPackagesById = {pkg.id: pkg for pkg in self.catalog.packages}
@@ -1060,6 +1037,8 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
             lastOverall: int | None = None
             lastStatusMessage = ""
             for i, package in enumerate(packages):
+                if self._closing:
+                    break
 
                 def _progress(
                     percent: int | None,
@@ -1087,13 +1066,16 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
                         )
                     if overall == lastOverall and statusMessage == lastStatusMessage:
                         return
+                    if self._closing:
+                        return
                     lastOverall = overall
                     lastStatusMessage = statusMessage
-                    wx.CallAfter(
-                        self.set_status,
-                        statusMessage,
-                        overall,
-                    )
+                    with contextlib.suppress(RuntimeError, AttributeError, AssertionError):
+                        wx.CallAfter(
+                            self.set_status,
+                            statusMessage,
+                            overall,
+                        )
 
                 try:
                     missingDependencyId = self._missing_dependency_for_package(package, catalogPackagesById)
@@ -1111,7 +1093,7 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
                     succeeded += 1
                     succeededIds.append(package.id)
                 except Exception as exc:
-                    log.error("Failed to download %s: %s", package.id, exc)
+                    log.error("Failed to download %s: %s", package.id, exc, exc_info=True)
                     failed.append((package.id, self._user_friendly_error_message(exc)))
             return {"succeeded": succeeded, "succeededIds": succeededIds, "failed": failed}
 
@@ -1150,6 +1132,7 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
                     packages=", ".join(package.id for package in requiredSucceededPackages),
                 )
             if succeededIds:
+                self._refresh_current_google_synth_catalog()
                 self._warm_current_google_synth_voice()
                 self._refresh_standby_google_synth_runtime()
             self.set_status(message, 100, announce=True)
@@ -1159,14 +1142,7 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
 
     def on_remove_selected(self, evt: wx.CommandEvent) -> None:
         if self._pendingRemoveAfterSynthSwitch is not None:
-            self.set_status(
-                _(
-                    "Waiting for you to switch away from Google TTS For NVDA before removing the last usable voice package."
-                ),
-                0,
-                announce=True,
-            )
-            return
+            self._clear_pending_remove()
         selectedPackages = self._checked_packages(self.installedList, self.installedPackages)
         if not selectedPackages:
             self.set_status(_("No voice packages are checked for removal."), 0, announce=True)
@@ -1204,13 +1180,7 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
                     count=len(packages),
                     packages=packageNames,
                 )
-            answer = gui.messageBox(
-                confirmMsg,
-                _("Google TTS Voice Manager"),
-                wx.YES_NO | wx.ICON_QUESTION,
-                self,
-            )
-            if answer != wx.YES:
+            if not self._confirm_yes_no(confirmMsg):
                 return
             packages = self._dependents_first(packages)
         self._remove_packages(packages)
@@ -1221,14 +1191,39 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
         def work() -> dict[str, Any]:
             succeeded = 0
             failed: list[tuple[str, str]] = []
+            failedIds: set[str] = set()
             removedIds: list[str] = []
             for package in packages:
+                if self._closing:
+                    break
+                blockedByDependent = next(
+                    (
+                        depPkg.id
+                        for depPkg in packages
+                        if depPkg.id in failedIds and getattr(depPkg, "dependentVoiceId", None) == package.id
+                    ),
+                    None,
+                )
+                if blockedByDependent is not None:
+                    log.error(
+                        "Cannot remove %s because dependent package %s could not be removed.",
+                        package.id,
+                        blockedByDependent,
+                    )
+                    depReason = next(
+                        (reason for pkgId, reason in failed if pkgId == blockedByDependent),
+                        _("An unexpected error occurred while managing voice packages."),
+                    )
+                    failedIds.add(package.id)
+                    failed.append((package.id, depReason))
+                    continue
                 try:
                     voice_store.remove_package(package)
                     succeeded += 1
                     removedIds.append(package.id)
                 except Exception as exc:
-                    log.error("Failed to remove %s: %s", package.id, exc)
+                    log.error("Failed to remove %s: %s", package.id, exc, exc_info=True)
+                    failedIds.add(package.id)
                     failed.append((package.id, self._user_friendly_error_message(exc)))
             return {"succeeded": succeeded, "failed": failed, "removedIds": removedIds}
 
@@ -1243,10 +1238,12 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
             failed = result["failed"]
             removedIds = set(result.get("removedIds", []))
             resetVoice = self._reset_configured_voice_if_removed(removedIds)
-            resetProfileCount = self._reset_auto_language_profile_variants_if_removed(removedIds)
+            resetAutoProfiles = self._reset_auto_language_profile_variants_if_removed(removedIds)
+            if removedIds:
+                self._refresh_current_google_synth_catalog(reloadSettingsAndRing=resetAutoProfiles)
             if resetVoice:
                 self._apply_reset_voice_to_current_synth(resetVoice)
-            if resetProfileCount:
+            if removedIds or resetAutoProfiles or resetVoice:
                 self._warm_current_google_synth_voice()
             if removedIds:
                 self._refresh_standby_google_synth_runtime()
@@ -1286,18 +1283,23 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
         done: Callable[[Any | BaseException], None],
         busyMessage: str,
     ) -> None:
-        if self.isBusy:
+        if self.isBusy or self._closing:
             return
         self.isBusy = True
         self._lastProgressAnnouncement = 0
-        self.closeButton.SetFocus()
+        with contextlib.suppress(RuntimeError):
+            self.closeButton.SetFocus()
         self._refresh_buttons()
         self.set_status(busyMessage, 0, announce=True)
 
         def safe_done(result: object) -> None:
+            if self._closing or not window_is_alive(self):
+                self.isBusy = False
+                return
             try:
                 done(result)
             except RuntimeError:
+                self.isBusy = False
                 log.debug("Ignoring VoiceManagerDialog callback after dialog destruction.", exc_info=True)
 
         def run() -> None:
@@ -1305,11 +1307,14 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
                 result = work()
             except Exception as exc:
                 result = exc
-            wx.CallAfter(safe_done, result)
+            with contextlib.suppress(RuntimeError, AttributeError, AssertionError):
+                wx.CallAfter(safe_done, result)
 
         threading.Thread(target=run, name="googleTtsForNvda.voiceManager", daemon=True).start()
 
     def set_status(self, message: str, percent: int | None = None, announce: bool = False) -> None:
+        if self._closing or not window_is_alive(self):
+            return
         try:
             self.statusText.SetLabel(message)
             if percent is not None:
@@ -1330,22 +1335,36 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
             return _("Could not write to the voice packages folder. Check folder permissions and try again.")
         if isinstance(error, FileNotFoundError):
             return _("The voice package file could not be found. Refresh the list and try again.")
-        if isinstance(error, (urllib.error.URLError, TimeoutError)):
+        if isinstance(
+            error,
+            (
+                urllib.error.URLError,
+                http.client.HTTPException,
+                TimeoutError,
+                ConnectionError,
+                socket.gaierror,
+                ssl.SSLError,
+            ),
+        ):
             return _("Could not download the voice package. Check your internet connection and try again.")
         if isinstance(error, OSError):
             return _(
                 "A file system error occurred while managing voice packages. "
                 "Check the voice packages folder and try again."
             )
-        message = str(error).strip()
-        return message or _("An unexpected error occurred while managing voice packages.")
+        voicePackageErrorCls = getattr(voice_store, "VoicePackageError", None)
+        if isinstance(voicePackageErrorCls, type) and isinstance(error, voicePackageErrorCls):
+            message = str(error).strip()
+            if message:
+                return message
+        return _("An unexpected error occurred while managing voice packages.")
 
     def show_error(self, error: BaseException) -> None:
         message = self._user_friendly_error_message(error)
         technicalMessage = str(error).strip() or error.__class__.__name__
         log.error("Google TTS voice manager operation failed: %s", technicalMessage)
         self.set_status(_("Voice package operation failed: {message}").format(message=message), 0)
-        gui.messageBox(message, _("Google TTS Voice Manager"), wx.OK | wx.ICON_ERROR, self)
+        show_message_box(message, _("Google TTS Voice Manager"), wx.OK | wx.ICON_ERROR, dialog_parent(self))
 
     def _refresh_buttons(self) -> None:
         hasInstalledItems = self.installedList.ItemCount > 0
@@ -1364,19 +1383,30 @@ class VoiceManagerDialog(nvdaControls.DPIScaledDialog):
         self.removeButton.Enable(not self.isBusy and hasInstalledItems)
         self.downloadButton.Enable(not self.isBusy and hasDownloadItems)
 
+    def prepare_for_shutdown(self) -> None:
+        self._closing = True
+        self._clear_pending_remove()
+
     def on_close(self, evt: wx.CloseEvent) -> None:
         if self.isBusy:
+            canVeto = getattr(evt, "CanVeto", None)
+            if callable(canVeto) and not canVeto():
+                self.prepare_for_shutdown()
+                self.Destroy()
+                return
             evt.Veto()
-            gui.messageBox(
+            show_message_box(
                 _("A voice package operation is still running."),
                 _("Google TTS Voice Manager"),
                 wx.OK | wx.ICON_INFORMATION,
-                self,
+                dialog_parent(self),
             )
             return
+        self.prepare_for_shutdown()
         self.Destroy()
 
     def on_destroy(self, evt: wx.WindowDestroyEvent) -> None:
         if evt.GetEventObject() is self:
+            self.prepare_for_shutdown()
             self._onDestroy(self)
         evt.Skip()

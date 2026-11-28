@@ -32,7 +32,7 @@ compressed sizes, dependency information, and speaker metadata. Downloaded
 .zvoice voice packages are not distributed as part of this add-on.
 
 Catalog SHA-256 at the time of this notice:
-B01ED54632CA1B384066BE0DEEF2C06A58D7DB281C4CBFF765885AB788307716
+D5D671436F7FA2E3757BDEA266E9BF437E332C70FF7698BB6A31531640A64C3B
 
 License scope
 -------------

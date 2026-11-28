@@ -32,19 +32,21 @@ _FULLWIDTH = "".join(chr(cp) for cp in range(0xFF01, 0xFF5E + 1))  # fullwidth A
 _EXTENDED_LATIN = "".join(chr(cp) for cp in range(0x00C0, 0x024F + 1, 3))  # Latin Extended
 
 
-def _random_text(min_len: int = 10, max_len: int = 500) -> str:
+def _random_text(min_len: int = 10, max_len: int = 500, *, rng: random.Random | None = None) -> str:
     """Generate random text from a mix of Unicode scripts."""
+    prng = rng or random.Random(20260401)
     pools = [_LATIN, _CJK, _THAI, _ARABIC, _DEVANAGARI, _EMOJI, _FULLWIDTH, _EXTENDED_LATIN]
-    length = random.randint(min_len, max_len)
+    length = prng.randint(min_len, max_len)
     chars = []
     for _ in range(length):
-        pool = random.choice(pools)
-        chars.append(random.choice(pool) if pool else " ")
+        pool = prng.choice(pools)
+        chars.append(prng.choice(pool) if pool else " ")
     return "".join(chars)
 
 
-def _random_script_text(script: str, min_len: int = 50, max_len: int = 300) -> str:
+def _random_script_text(script: str, min_len: int = 50, max_len: int = 300, *, rng: random.Random | None = None) -> str:
     """Generate random text from a single Unicode script."""
+    prng = rng or random.Random(20260402)
     pools = {
         "latin": _LATIN,
         "cjk": _CJK,
@@ -54,8 +56,8 @@ def _random_script_text(script: str, min_len: int = 50, max_len: int = 300) -> s
         "emoji": _EMOJI,
     }
     pool = pools.get(script, _LATIN)
-    length = random.randint(min_len, max_len)
-    return "".join(random.choice(pool) if pool else " " for _ in range(length))
+    length = prng.randint(min_len, max_len)
+    return "".join(prng.choice(pool) if pool else " " for _ in range(length))
 
 
 # ---------------------------------------------------------------------------
@@ -68,8 +70,9 @@ class SegmentationFuzzTests(unittest.TestCase):
 
     def test_sentence_splits_never_crash_on_random_unicode(self) -> None:
         """find_sentence_splits must not raise on any random Unicode input."""
+        rng = random.Random(20260401)
         for _ in range(100):
-            text = _random_text(0, 2000)
+            text = _random_text(0, 2000, rng=rng)
             # Should not raise
             splits = segmenter.find_sentence_splits(text)
             self.assertIsInstance(splits, list)
@@ -80,22 +83,27 @@ class SegmentationFuzzTests(unittest.TestCase):
 
     def test_sentence_splits_are_monotonically_increasing(self) -> None:
         """Split indices must be strictly increasing."""
+        rng = random.Random(20260402)
         for _ in range(50):
-            text = _random_text(10, 1000)
+            text = _random_text(10, 1000, rng=rng)
             splits = segmenter.find_sentence_splits(text)
             for i in range(1, len(splits)):
                 self.assertGreater(splits[i], splits[i - 1])
 
     def test_latency_segments_cover_full_input(self) -> None:
         """Latency segments must join back to the original text (whitespace-collapsed)."""
+        rng = random.Random(20260403)
         for _ in range(50):
-            text = _random_text(10, 1500)
+            text = _random_text(10, 1500, rng=rng)
             for fast_first in (True, False):
                 segments = list(segmenter.iter_text_segments_for_latency(text, fast_first))
-                if not segments:
+                if not text.strip():
+                    self.assertEqual([], segments)
                     continue
-                # All segments must be non-empty
+                self.assertTrue(segments, f"Non-empty text produced no segments: {text[:100]!r}")
+                # All segments must be non-empty strings
                 for seg in segments:
+                    self.assertIsInstance(seg, str)
                     self.assertTrue(seg.strip(), f"Empty segment in: {segments}")
                 # Concatenated segments must cover the full text
                 joined = "".join(segments)
@@ -104,11 +112,22 @@ class SegmentationFuzzTests(unittest.TestCase):
                     "".join(joined.split()),
                     f"Segments don't cover full text: {text[:100]}...",
                 )
+                sample_indexes = [(0, 0), (1, len(text) // 2), (2, len(text))]
+                indexed = list(segmenter.iter_indexed_text_segments(text, sample_indexes, fast_first))
+                self.assertEqual([seg for seg, _seg_indexes in indexed], segments)
+                emitted_ids: list[int] = []
+                for seg, seg_indexes in indexed:
+                    for idx_id, rel_offset in seg_indexes:
+                        emitted_ids.append(idx_id)
+                        self.assertGreaterEqual(rel_offset, 0)
+                        self.assertLessEqual(rel_offset, len(seg))
+                self.assertEqual([0, 1, 2], emitted_ids)
 
     def test_latency_segments_respect_max_length(self) -> None:
         """No latency segment should exceed the hard maximum."""
+        rng = random.Random(20260404)
         for _ in range(50):
-            text = _random_text(50, 2000)
+            text = _random_text(50, 2000, rng=rng)
             segments = list(segmenter.iter_text_segments_for_latency(text, False))
             for seg in segments:
                 self.assertLessEqual(
@@ -117,23 +136,15 @@ class SegmentationFuzzTests(unittest.TestCase):
                     f"Segment too long ({len(seg)} chars): {seg[:50]}...",
                 )
 
-    def test_segments_are_non_empty_strings(self) -> None:
-        """All produced segments must be non-empty strings."""
-        for _ in range(100):
-            text = _random_text(10, 500)
-            segments = list(segmenter.iter_text_segments_for_latency(text, False))
-            for seg in segments:
-                self.assertIsInstance(seg, str)
-                self.assertTrue(len(seg) > 0, f"Empty segment produced for text length {len(text)}")
-
     def test_mixed_script_text_segments_correctly(self) -> None:
         """Mixed Latin + CJK + emoji text should segment without issues."""
+        rng = random.Random(20260405)
         for _ in range(30):
             parts = [
-                random.choice(_LATIN) * random.randint(5, 30),
-                random.choice(_CJK) * random.randint(5, 20),
-                _EMOJI[: random.randint(1, len(_EMOJI))],
-                random.choice(_LATIN) * random.randint(5, 30),
+                rng.choice(_LATIN) * rng.randint(5, 30),
+                rng.choice(_CJK) * rng.randint(5, 20),
+                _EMOJI[: rng.randint(1, len(_EMOJI))],
+                rng.choice(_LATIN) * rng.randint(5, 30),
             ]
             text = " ".join(parts)
             segments = list(segmenter.iter_text_segments_for_latency(text, True))
@@ -157,18 +168,20 @@ class SegmentationFuzzTests(unittest.TestCase):
 
     def test_punctuation_heavy_text(self) -> None:
         """Text with lots of punctuation should segment without crashes."""
+        rng = random.Random(20260406)
         for _ in range(30):
             text = ""
-            for _ in range(random.randint(10, 100)):
-                text += random.choice(_PUNCTUATION) + random.choice(_LATIN) * random.randint(1, 5)
+            for _ in range(rng.randint(10, 100)):
+                text += rng.choice(_PUNCTUATION) + rng.choice(_LATIN) * rng.randint(1, 5)
             segments = list(segmenter.iter_text_segments_for_latency(text, False))
             self.assertGreater(len(segments), 0)
 
     def test_all_same_script_text(self) -> None:
         """Text in a single script should segment consistently."""
+        rng = random.Random(20260407)
         for script in ("latin", "cjk", "thai", "arabic", "devanagari"):
             for _ in range(10):
-                text = _random_script_text(script, 100, 500)
+                text = _random_script_text(script, 100, 500, rng=rng)
                 segments = list(segmenter.iter_text_segments_for_latency(text, False))
                 self.assertGreater(len(segments), 0, f"No segments for {script}")
                 # Verify coverage
@@ -179,27 +192,17 @@ class SegmentationFuzzTests(unittest.TestCase):
 class SentenceSplitFuzzTests(unittest.TestCase):
     """Fuzz tests specifically for sentence splitting."""
 
-    def test_sentence_splits_produce_valid_indices(self) -> None:
-        """All split indices must be valid string positions."""
-        for _ in range(100):
-            text = _random_text(0, 1000)
-            splits = segmenter.find_sentence_splits(text)
-            for idx in splits:
-                self.assertGreaterEqual(idx, 0)
-                self.assertLessEqual(idx, len(text))
-
     def test_sentence_splits_dont_split_inside_cjk(self) -> None:
         """CJK fullwidth punctuation should cause splits at valid boundaries."""
+        rng = random.Random(20260408)
         for _ in range(20):
             # CJK text with sentence terminators
-            cp = random.choice([0x3002, 0xFF01, 0xFF1F])  # 。！？
-            text = "测试文本" * random.randint(2, 10) + chr(cp) + "下一句" * random.randint(2, 10)
+            cp = rng.choice([0x3002, 0xFF01, 0xFF1F])  # 。！？
+            text = "测试文本" * rng.randint(2, 10) + chr(cp) + "下一句" * rng.randint(2, 10)
             splits = segmenter.find_sentence_splits(text)
-            # Should have at least one split
-            if splits:
-                # First split should be at or after the punctuation
-                punct_pos = text.index(chr(cp)) + 1
-                self.assertGreaterEqual(splits[0], punct_pos)
+            self.assertTrue(splits, f"Expected sentence split for {text!r}")
+            punct_pos = text.index(chr(cp)) + 1
+            self.assertGreaterEqual(splits[0], punct_pos)
 
     def test_ellipsis_doesnt_over_split(self) -> None:
         """Ellipsis should be treated as sentence terminal but not cause excessive splits."""

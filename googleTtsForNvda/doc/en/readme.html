@@ -18,14 +18,14 @@
 		<li><strong>Diverse languages and voices:</strong> Provides multiple Google TTS voice packages for supported languages.</li>
 		<li><strong>Fast response and low latency:</strong> Uses text segmentation and audio buffering to improve NVDA responsiveness.</li>
 		<li><strong>Google TTS Voice Manager:</strong> Browse, download, remove, and inspect voice packages from an accessible dialog.</li>
-		<li><strong>Chromium Browser Runtime Selection:</strong> Choose Google Chrome, Microsoft Edge, or Brave as the supported background browser runtime.</li>
+		<li><strong>Chromium browser runtime selection:</strong> Choose Google Chrome, Microsoft Edge, or Brave as the supported background browser runtime.</li>
 		<li><strong>Automatic language profiles:</strong> Optionally use per-language profiles so different languages can have their own voice and speech values.</li>
 		<li><strong>Built-in add-on updates:</strong> Check for add-on updates from NVDA Settings, with an optional once-per-startup automatic check.</li>
 	</ul>
 
 	<h2>System Requirements</h2>
 	<ul>
-		<li><strong>NVDA:</strong> Version 2024.1 or newer. The add-on supports NVDA 2024 through 2026 on both 32-bit (x86) and 64-bit (x64) NVDA builds.</li>
+		<li><strong>NVDA:</strong> Version 2024.1 or newer. The add-on supports NVDA 2024 through 2027 on both 32-bit (x86) and 64-bit (x64) NVDA builds.</li>
 		<li><strong>Chromium browser:</strong> Google Chrome, Microsoft Edge, or Brave installed on your computer. If you use Microsoft Edge as the runtime, Microsoft Edge WebView2 Runtime must also be available.</li>
 		<li><strong>Interactive Windows user session:</strong> Do not rely on this add-on where the Chromium browser runtime cannot start, such as the Windows sign-in screen, secure desktop contexts, Windows PE, recovery environments, or other minimal Windows sessions.</li>
 	</ul>
@@ -35,7 +35,7 @@
 		<li>Open NVDA's <strong>Select Synthesizer</strong> dialog by pressing <kbd>NVDA+Ctrl+S</kbd> and choose <strong>Google TTS For NVDA</strong>.</li>
 		<li>If no voice packages are installed, NVDA will display a message indicating that no Google TTS For NVDA voices are installed. Press <strong>OK</strong> to open Google TTS Voice Manager and download a voice package. Press <strong>Cancel</strong> to keep using your current synthesizer for now.</li>
 		<li>In Google TTS Voice Manager, download at least one voice package from the <strong>Download</strong> tab.</li>
-		<li>Once downloaded, open <strong>Speech settings</strong> (<kbd>NVDA+Ctrl+V</kbd>) to select your preferred language and variant.</li>
+		<li>Once downloaded, open <strong>Speech Settings</strong> (<kbd>NVDA+Ctrl+V</kbd>) to select your preferred language and variant.</li>
 	</ol>
 
 	<h2>Managing Voices</h2>
@@ -58,12 +58,12 @@
 
 	<h2>Configuration</h2>
 	<h3>Speech Settings</h3>
-	<p>NVDA's Speech settings dialog (<kbd>NVDA+Ctrl+V</kbd>) provides <strong>Pauses</strong> for Google TTS For NVDA whether automatic language profiles are on or off. When automatic language profiles are off, the dialog also provides:</p>
+	<p>NVDA's Speech Settings dialog (<kbd>NVDA+Ctrl+V</kbd>) provides <strong>Pauses</strong> for Google TTS For NVDA whether automatic language profiles are on or off. When automatic language profiles are off, the dialog also provides:</p>
 	<ul>
 		<li><strong>Voice:</strong> Choose the installed Google TTS language.</li>
 		<li><strong>Variant:</strong> Choose the voice name within that language, including Chrome OS and Google Natural voices when installed.</li>
 		<li><strong>Rate:</strong> Adjust the reading speed.</li>
-		<li><strong>Rate Boost:</strong> Enable to double the speech rate for high-speed reading.</li>
+		<li><strong>Rate boost:</strong> Enable to double the speech rate for high-speed reading.</li>
 		<li><strong>Pitch:</strong> Adjust the pitch of the voice.</li>
 		<li><strong>Volume:</strong> Adjust the speech volume.</li>
 	</ul>
@@ -89,7 +89,12 @@
 			<ul>
 				<li><strong>Automatically check for add-on updates when NVDA starts:</strong> Let Google TTS For NVDA check once after the next NVDA startup. This is off by default.</li>
 				<li><strong>Add-on update status:</strong> Review the installed add-on version, whether automatic startup checks are on or off, and whether a check is currently running.</li>
-				<li><strong>Check for updates...</strong>: Manually check for the latest stable add-on release.</li>
+				<li><strong>Check for updates...:</strong> Manually check for the latest stable add-on release.</li>
+			</ul>
+		</li>
+		<li><strong>Support the add-on:</strong> Contains the donation button below.
+			<ul>
+				<li><strong>Donate...:</strong> Open the <strong>Donate to Google TTS For NVDA</strong> dialog, which notes that contributions are optional, includes the suggested transfer note (<code>Thanks for Google TTS For NVDA</code>), and provides buttons to open the maintainer's PayPal link in your browser or view all payment methods on GitHub (Vietnam bank transfer, PayPal, US ACH/Fedwire, and international SWIFT). If Windows cannot open a link automatically, the add-on displays the address in a read-only field with a <strong>Copy link</strong> button so you can open it manually.</li>
 			</ul>
 		</li>
 	</ul>
@@ -102,7 +107,7 @@
 	<p>The updater can also recognize small hotfix builds inside the same public version. This lets maintainers publish compatibility or reliability fixes without changing the displayed version number, while NVDA can still offer the newer build when the release metadata says one is available.</p>
 
 	<h3>Automatic Language Profiles</h3>
-	<p>When <strong>Use automatic language profiles</strong> is enabled, detected sentences use the add-on's per-language profiles instead of the normal NVDA Speech settings. If only one language profile is enabled, that profile is used for every sentence. Your regular Google TTS language and variant settings remain available again when automatic language profiles are turned off.</p>
+	<p>When <strong>Use automatic language profiles</strong> is enabled, detected sentences use the add-on's per-language profiles instead of the normal NVDA Speech Settings. If only one language profile is enabled, that profile is used for every sentence. Your regular Google TTS language and variant settings remain available again when automatic language profiles are turned off.</p>
 	<p>Automatic language profiles use bundled CLD2 detector libraries for both 32-bit (x86) and 64-bit (x64) NVDA builds. CLD2 results are accepted only when they are reliable enough for one of the enabled languages. If text is too short or unclear, the add-on uses conservative local language signals where available, then falls back to the preferred enabled language.</p>
 	<ol>
 		<li>Open <strong>NVDA Menu &rarr; Preferences &rarr; Settings &rarr; Google TTS For NVDA</strong>.</li>
@@ -118,11 +123,11 @@
 	<p>Google TTS ignores NVDA's own automatic language and dialect switching commands for this synthesizer, so those global options do not force Google TTS to change voices. Use Google TTS automatic language profiles when you want automatic voice/profile selection in this add-on. If NVDA's <strong>Report language changes while reading</strong> option is enabled, reported language names follow Google TTS automatic language profile detection while profiles are on. When profiles are off, NVDA can still use app-provided language changes for language reporting and character/symbol processing, including punctuation and symbol dictionaries, but Google TTS will not change voices from those commands.</p>
 	<p>Automatic language profiles set the language context before NVDA processes text, so NVDA's symbol pronunciation and speech dictionary processing stay in the normal speech flow for the selected language context.</p>
 	<p>When automatic language profiles are off, NVDA voice dictionaries work normally for the currently selected Google TTS variant. When automatic language profiles are on, the add-on temporarily uses the voice dictionary for each enabled language profile's selected variant while NVDA processes that segment. NVDA's default and temporary dictionaries still follow NVDA's normal behavior.</p>
-	<p>While automatic language profiles are enabled, NVDA's Speech settings dialog will not offer the normal voice, variant, rate, rate boost, pitch, and volume controls for this synthesizer. It will show a focusable notice directing you to the Google TTS For NVDA settings category instead. <strong>Pauses</strong> remains available in Speech settings and applies to all Google TTS speech. The normal synth settings ring commands, such as <kbd>NVDA+Ctrl+Arrow keys</kbd> on desktop keyboards or <kbd>NVDA+Shift+Ctrl+Arrow keys</kbd> on laptop keyboards, announce this notice instead of changing the Google TTS voice or speech values in this mode. Google TTS also uses each enabled profile's capital-letter and spelling options while automatic language profiles are on; the normal Speech Settings values remain available again when automatic language profiles are turned off. Status messages in the Google TTS For NVDA settings category are also reachable with Tab so screen readers can announce them.</p>
+	<p>While automatic language profiles are enabled, NVDA's Speech Settings dialog will not offer the normal voice, variant, rate, rate boost, pitch, and volume controls for this synthesizer. It will show a focusable notice directing you to the Google TTS For NVDA settings category instead. <strong>Pauses</strong> remains available in Speech Settings and applies to all Google TTS speech. The normal synth settings ring commands, such as <kbd>NVDA+Ctrl+Arrow keys</kbd> on desktop keyboards or <kbd>NVDA+Shift+Ctrl+Arrow keys</kbd> on laptop keyboards, announce this notice instead of changing the Google TTS voice or speech values in this mode. Google TTS also uses each enabled profile's capital-letter and spelling options while automatic language profiles are on; the normal Speech Settings values remain available again when automatic language profiles are turned off. Status messages in the Google TTS For NVDA settings category are also reachable with Tab so screen readers can announce them.</p>
 
 	<h2>Troubleshooting Edge Runtime Silence</h2>
 	<p>If you choose <strong>Microsoft Edge</strong> as the Chromium browser runtime, Google TTS For NVDA also checks whether Microsoft Edge WebView2 Runtime is available. Edge may be installed while WebView2 is missing or damaged, and in that case the add-on cannot use Edge for speech. Google Chrome and Brave do not depend on WebView2.</p>
-	<p>WebView2 is the Microsoft Edge runtime used by native Windows applications to host web content. It is related to Microsoft Edge, but having the normal Edge browser available does not always mean the WebView2 Runtime is installed and healthy for app scenarios. Microsoft recommends the Evergreen WebView2 Runtime for applications because it is shared, automatically updated, and the small Evergreen Bootstrapper downloads the matching runtime for the device architecture.</p>
+	<p>WebView2 is the Microsoft Edge runtime used by native Windows applications to host web content. It is related to Microsoft Edge, but having the normal Edge browser available does not always mean the WebView2 Runtime is installed and healthy for app scenarios. Microsoft recommends the Evergreen WebView2 Runtime for applications because it is shared and automatically updated, and the small Evergreen Bootstrapper downloads the matching runtime for the device architecture.</p>
 	<p>When WebView2 is needed, Google TTS For NVDA offers buttons to download Microsoft's online Evergreen Bootstrapper, open Microsoft's WebView2 page for offline installers or fixed-version packages, or leave the change for later. NVDA keeps using the previous synthesizer until WebView2 is available.</p>
 	<p>If Windows cannot open the download page, the add-on shows the download address in a labeled read-only field and includes a <strong>Copy link</strong> button so you can paste the address into a browser manually.</p>
 	<p>For an online computer, download the Microsoft Edge WebView2 Evergreen Bootstrapper here: <a href="https://go.microsoft.com/fwlink/p/?LinkId=2124703">Download Microsoft Edge WebView2 Runtime</a>.</p>
@@ -138,14 +143,59 @@
 	<p>We value pull requests from the community. A contribution can be accepted when the code runs reliably, fits the add-on's existing logic and interface, avoids introducing regressions in other add-on features, does not interfere with other NVDA add-ons or NVDA itself, does not weaken add-on security, and does not collect user data without permission.</p>
 
 	<h2>Support &amp; Contact</h2>
-	<p>If you have questions, feedback, or need assistance, feel free to contact the development team:</p>
+	<p>If you have questions or feedback, or need assistance, please contact the current maintainer:</p>
+	<ul>
+		<li><strong>Pham Hung Vuong</strong> <em>(Maintainer &amp; Lead Developer)</em>: <a href="mailto:hungvuong106206@gmail.com">hungvuong106206@gmail.com</a> | <a href="https://t.me/phamhungvuong302">t.me/phamhungvuong302</a></li>
+	</ul>
+	<p>Original co-authors (no longer active developers):</p>
 	<ul>
 		<li><strong>Nguyen Anh Duc:</strong> <a href="mailto:ducna1803@gmail.com">ducna1803@gmail.com</a> | <a href="https://t.me/anhduc1803">t.me/anhduc1803</a></li>
 		<li><strong>Dao Duc Trung:</strong> <a href="mailto:trung@ddt.one">trung@ddt.one</a> | <a href="https://t.me/Daoductrung">t.me/Daoductrung</a></li>
-		<li><strong>Pham Hung Vuong:</strong> <a href="mailto:hungvuong106206@gmail.com">hungvuong106206@gmail.com</a> | <a href="https://t.me/phamhungvuong302">t.me/phamhungvuong302</a></li>
 	</ul>
+	<p>Google TTS For NVDA is free, open-source software, and donations are completely optional. If you would like to support ongoing development, see the <a href="https://github.com/phamhungvuong302/Google-TTS-For-NVDA/blob/main/DONATE.md">payment methods page on GitHub</a> or choose <strong>Donate...</strong> under <strong>NVDA Menu &rarr; Preferences &rarr; Settings &rarr; Google TTS For NVDA</strong>.</p>
 
 	<h2>Change Log</h2>
+	<h3>Version 1.1 (2026-11-28)</h3>
+	<ul>
+		<li><strong>More accurate reading progress and smoother pauses:</strong>
+			<ul>
+				<li>Speech progress markers are now synchronized with actual audio playback, so NVDA tracks the spoken position much more accurately during Say All and when interrupting long text.</li>
+				<li>Consecutive clauses and sentences are now processed together more smoothly, reducing awkward delays between sentences while preserving natural spacing.</li>
+				<li>Improved the <strong>Pauses</strong> setting (especially <strong>Shorten all pauses</strong> and <strong>Shorten at end of text only</strong>) with cleaner pause timing, rate-aware scaling, leading-silence trimming, and filtering of faint trailing glitches. Silence detection was also tuned for SeaNet and Lemonbalm voices so short consonant pauses are not clipped.</li>
+			</ul>
+		</li>
+		<li><strong>Better voice quality, more voices, and improved multilingual handling:</strong>
+			<ul>
+				<li>Upgraded pitch shifting and tempo processing on SeaNet and Lemonbalm voices to prevent muffled speech, reduce audio artifacts, and keep high reading speeds clearer when using <strong>Rate</strong> and <strong>Rate boost</strong>.</li>
+				<li>Enabled 8 additional Lemonbalm voice packages with proper base-package dependency tracking (for German, English, Spanish, French, Hindi, and Brazilian Portuguese), bringing the catalog to 168 usable packages.</li>
+				<li>Unified localized language names and language-aware sorting across Speech Settings, Google TTS Voice Manager, and Automatic Language Profiles so all lists show consistent names in the same order.</li>
+				<li>Updated punctuation, emoji, grapheme, and writing-system rules to official Unicode 18.0 and CLDR 49 data, improving sentence splitting and automatic language profile detection for newly assigned characters, emoji flag sequences, halfwidth Katakana sound marks, and additional scripts with limited word spacing.</li>
+			</ul>
+		</li>
+		<li><strong>Stronger security:</strong>
+			<ul>
+				<li>Protected internal communication with the Chromium browser runtime by rejecting WebSocket connections from external web origins.</li>
+				<li>Enforced HTTPS-only connections, secure redirects, and size limits for voice package downloads, and tightened verification and download-directory safety checks in the built-in add-on updater.</li>
+			</ul>
+		</li>
+		<li><strong>Reliability, NVDA 2027.1 compatibility, and support:</strong>
+			<ul>
+				<li>Updated compatibility for NVDA 2027.1 (supporting NVDA 2024.1 through 2027.1) and improved dialog and secure-screen handling across supported NVDA versions.</li>
+				<li>Prevented overlapping speech and rare Windows audio output errors when utterances start, stop, or switch quickly.</li>
+				<li>Bypassed system proxy settings for local browser communication so proxy configurations do not block offline speech. Also improved browser connection cancellation and shutdown, and prevented temporary fallback browser profiles from interfering with an active profile.</li>
+				<li>Added an optional <strong>Support the add-on</strong> section with a <strong>Donate...</strong> button in the Google TTS For NVDA settings category.</li>
+			</ul>
+		</li>
+		<li><strong>Updated components and translations:</strong>
+			<ul>
+				<li>Updated the bundled WASM TTS engine to version 20261110.1.</li>
+				<li>Updated the bundled <code>websocket-client</code> library to version 1.10.0, keeping it isolated from other NVDA add-ons.</li>
+				<li>Updated translations.</li>
+				<li>Updated maintainer contact details and project links.</li>
+			</ul>
+		</li>
+	</ul>
+
 	<h3>Version 1.0 (2026-10-12)</h3>
 	<ul>
 		<li><strong>Faster and smoother reading:</strong>
@@ -203,7 +253,7 @@
 		<li><strong>Chromium Runtime Fallback:</strong> Improved Chrome, Edge, and Brave fallback so Google TTS For NVDA can try another supported browser runtime when the selected one cannot start or is not ready. Edge can now be skipped when WebView2 is missing and another supported runtime is usable. Google TTS For NVDA also waits and retries when the browser is still finishing startup, reducing rare silent startup or browser connection failures.</li>
 		<li><strong>NVDA Compatibility:</strong> Improved compatibility with older and newer NVDA versions across speech, spelling, voice dictionaries, settings, synth switching, the global plugin, and the synth driver. Google TTS also keeps NVDA/app language-change commands from switching Google voices while preserving them for language reporting and character/symbol processing when automatic language profiles are off.</li>
 		<li><strong>Simplified Chinese, Traditional Chinese, and Russian Localization:</strong> Added Simplified Chinese, Traditional Chinese, and Russian UI translations and user documentation. The Chinese locales also include localized add-on metadata.</li>
-		<li><strong>Speech Reliability:</strong> Fixed rare cases where interrupted speech could be replayed incompletely, restored Pitch control for SeaNet voices, and avoided a rare Voice Settings error after switching away from Google TTS. Added the <strong>Pauses</strong> setting for optional pause shortening; enable it from NVDA's Speech settings dialog (<kbd>NVDA+Ctrl+V</kbd>), with details in the Configuration section.</li>
+		<li><strong>Speech Reliability:</strong> Fixed rare cases where interrupted speech could be replayed incompletely, restored Pitch control for SeaNet voices, and avoided a rare Speech Settings error after switching away from Google TTS. Added the <strong>Pauses</strong> setting for optional pause shortening; enable it from NVDA's Speech Settings dialog (<kbd>NVDA+Ctrl+V</kbd>), with details in the Configuration section.</li>
 		<li><strong>Status Field Accessibility:</strong> Made runtime, automatic language profile, update, Speech Settings notice, and manual URL fallback status fields easier to focus and review without delayed repeated announcements.</li>
 	</ul>
 
@@ -239,6 +289,6 @@
 	<ul>
 		<li>Initial release.</li>
 	</ul>
-	<p>Last edited on 2026-10-12</p>
+	<p>Last edited on 2026-11-28</p>
 </body>
 </html>

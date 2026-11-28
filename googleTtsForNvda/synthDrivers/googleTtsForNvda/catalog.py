@@ -5,10 +5,20 @@ import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
+
+try:
+    import addonHandler
+
+    addonHandler.initTranslation()
+except Exception:
+
+    def _(message: str) -> str:
+        return message
+
 
 BASE_DIR = Path(__file__).resolve().parent
-ENGINE_VERSION = "20260917.1"
+ENGINE_VERSION = "20261110.1"
 ENGINE_ROOT = BASE_DIR / "WasmTtsEngine"
 ENGINE_DIR = ENGINE_ROOT / ENGINE_VERSION
 CATALOG_PATH = ENGINE_DIR / "voices.json"
@@ -27,8 +37,9 @@ REQUIRED_ENGINE_FILES = (
     "LICENSE",
     "VOICE_CATALOG_NOTICE.txt",
 )
-# The bundled engine reports these package families as unavailable even when their .zvoice files verify.
-UNSUPPORTED_ENGINE_PACKAGE_ID_PARTS = ("locomel", "lemonbalm")
+# The bundled engine either omits required runtime classes (locomel) or ships EdgeTPU-only
+# primary models (darwinnrio) whose redundant packages would fall back to smaller CPU variants.
+UNSUPPORTED_ENGINE_PACKAGE_ID_PARTS = ("locomel", "darwinnrio")
 
 
 class EngineLibraryError(RuntimeError):
@@ -84,10 +95,13 @@ class Speaker:
 
 
 def package_id_to_language(packageId: str) -> str:
-    match = re.match(r"^([a-z]{2,3})-([a-z]{2})(?:-|$)", packageId, re.I)
+    match = re.match(r"^([a-z]{2,3})(?:-([a-z]{4}))?-([a-z]{2})(?:-|$)", packageId, re.I)
     if not match:
         return packageId
-    return f"{match.group(1).lower()}-{match.group(2).upper()}"
+    lang, script, region = match.group(1).lower(), match.group(2), match.group(3).upper()
+    if script:
+        return f"{lang}-{script.title()}-{region}"
+    return f"{lang}-{region}"
 
 
 def is_package_supported_by_engine(package: VoicePackage) -> bool:
@@ -133,7 +147,7 @@ def inspect_engine_library() -> None:
     try:
         manifest = json.loads((ENGINE_DIR / "manifest.json").read_text(encoding="utf-8"))
         manifestVersion = str(manifest.get("version") or "").strip() if isinstance(manifest, dict) else ""
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise EngineLibraryError(
             "incomplete",
             foundVersions=foundVersions,
@@ -148,6 +162,20 @@ def inspect_engine_library() -> None:
                 f"does not match supported version {ENGINE_VERSION}."
             ),
         )
+
+
+def _raise_invalid_catalog(
+    path: Path | None,
+    engineDetail: str,
+    valueDetail: str,
+    *,
+    cause: Exception | None = None,
+) -> NoReturn:
+    if path is None:
+        raise EngineLibraryError("invalidCatalog", technicalDetail=engineDetail) from cause
+    if cause is not None:
+        raise ValueError(valueDetail) from cause
+    raise ValueError(valueDetail)
 
 
 class VoiceCatalog:
@@ -171,27 +199,65 @@ class VoiceCatalog:
                     technicalDetail=f"WASM TTS Engine voice catalog could not be opened: {exc}",
                 ) from exc
             raise
-        except json.JSONDecodeError as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             if path is None:
                 raise EngineLibraryError(
                     "invalidCatalog",
                     technicalDetail=f"WASM TTS Engine voice catalog could not be read: {exc}",
                 ) from exc
             raise
+        if not isinstance(raw, list):
+            _raise_invalid_catalog(
+                path,
+                "WASM TTS Engine voice catalog JSON must be a list.",
+                "Voice catalog JSON must be a list.",
+            )
         packages: list[VoicePackage] = []
         for item in raw:
             if not isinstance(item, dict):
                 continue
+            packageId = _safe_str(item.get("id")).strip()
+            if (
+                not packageId
+                or packageId == "."
+                or "/" in packageId
+                or "\\" in packageId
+                or "\x00" in packageId
+                or ".." in packageId
+            ):
+                _raise_invalid_catalog(
+                    path,
+                    f"WASM TTS Engine voice catalog contains an invalid package id: {packageId!r}",
+                    f"Invalid voice package id in catalog: {packageId!r}",
+                )
+            rawCompressedSize = item.get("compressedSize")
+            try:
+                if isinstance(rawCompressedSize, bool):
+                    raise ValueError("Boolean compressedSize is invalid.")
+                compressedSize = 0 if rawCompressedSize is None else int(rawCompressedSize)
+            except (TypeError, ValueError) as exc:
+                _raise_invalid_catalog(
+                    path,
+                    f"WASM TTS Engine voice catalog contains an invalid compressedSize: {rawCompressedSize!r}",
+                    f"Invalid compressedSize in voice catalog: {rawCompressedSize!r}",
+                    cause=exc,
+                )
+            if compressedSize < 0:
+                _raise_invalid_catalog(
+                    path,
+                    f"WASM TTS Engine voice catalog contains a negative compressedSize: {rawCompressedSize!r}",
+                    f"Negative compressedSize in voice catalog: {rawCompressedSize!r}",
+                )
             speakers = item.get("speakers")
             if not isinstance(speakers, list):
                 speakers = []
             packages.append(
                 VoicePackage(
-                    id=_safe_str(item.get("id")),
+                    id=packageId,
                     fileId=_safe_str(item.get("fileId")),
                     url=_safe_str(item.get("url")),
                     sha256Checksum=_safe_str(item.get("sha256Checksum")),
-                    compressedSize=int(item.get("compressedSize") or 0),
+                    compressedSize=compressedSize,
                     remote=bool(item.get("remote", True)),
                     speakers=tuple(s for s in speakers if isinstance(s, dict)),
                     dependentVoiceId=_safe_str(item.get("dependentVoiceId")),
@@ -205,9 +271,13 @@ class VoiceCatalog:
         for package in self.packages:
             for rawSpeaker in package.speakers:
                 speakerCode = _safe_str(rawSpeaker.get("speaker"))
-                name = _safe_str(rawSpeaker.get("name"), speakerCode or package.id)
+                rawName = _safe_str(rawSpeaker.get("name"))
+                name = rawName if rawName.strip() else (speakerCode or package.id)
                 gender = _safe_str(rawSpeaker.get("gender"))
-                speakerId = f"{package.id}:{speakerCode or name}"
+                speakerKey = speakerCode or name
+                if not package.id or not speakerKey:
+                    continue
+                speakerId = f"{package.id}:{speakerKey}"
                 if speakerId in seen:
                     continue
                 seen.add(speakerId)
@@ -267,10 +337,6 @@ def engine_library_error_message(error: EngineLibraryError) -> str:
     Shared by the synth driver and the global plugin so both produce
     identical wording without duplicating the translation strings.
     """
-    import builtins
-
-    _: Any = getattr(builtins, "_", str)
-
     if error.kind == "unsupportedVersion":
         found = ", ".join(error.foundVersions) if error.foundVersions else _("another version")
         return _(
