@@ -18,7 +18,7 @@
 		<li><strong>Diverse languages and voices:</strong> Provides multiple Google TTS voice packages for supported languages.</li>
 		<li><strong>Fast response and low latency:</strong> Uses text segmentation and audio buffering to improve NVDA responsiveness.</li>
 		<li><strong>Google TTS Voice Manager:</strong> Browse, download, remove, and inspect voice packages from an accessible dialog.</li>
-		<li><strong>Chromium Browser Runtime Selection:</strong> Choose Google Chrome, Microsoft Edge, or Brave as the supported background browser runtime.</li>
+		<li><strong>Chromium browser runtime selection:</strong> Choose Google Chrome, Microsoft Edge, or Brave as the supported background browser runtime.</li>
 		<li><strong>Automatic language profiles:</strong> Optionally use per-language profiles so different languages can have their own voice and speech values.</li>
 		<li><strong>Built-in add-on updates:</strong> Check for add-on updates from NVDA Settings, with an optional once-per-startup automatic check.</li>
 	</ul>
@@ -127,7 +127,7 @@
 
 	<h2>Troubleshooting Edge Runtime Silence</h2>
 	<p>If you choose <strong>Microsoft Edge</strong> as the Chromium browser runtime, Google TTS For NVDA also checks whether Microsoft Edge WebView2 Runtime is available. Edge may be installed while WebView2 is missing or damaged, and in that case the add-on cannot use Edge for speech. Google Chrome and Brave do not depend on WebView2.</p>
-	<p>WebView2 is the Microsoft Edge runtime used by native Windows applications to host web content. It is related to Microsoft Edge, but having the normal Edge browser available does not always mean the WebView2 Runtime is installed and healthy for app scenarios. Microsoft recommends the Evergreen WebView2 Runtime for applications because it is shared, automatically updated, and the small Evergreen Bootstrapper downloads the matching runtime for the device architecture.</p>
+	<p>WebView2 is the Microsoft Edge runtime used by native Windows applications to host web content. It is related to Microsoft Edge, but having the normal Edge browser available does not always mean the WebView2 Runtime is installed and healthy for app scenarios. Microsoft recommends the Evergreen WebView2 Runtime for applications because it is shared and automatically updated, and the small Evergreen Bootstrapper downloads the matching runtime for the device architecture.</p>
 	<p>When WebView2 is needed, Google TTS For NVDA offers buttons to download Microsoft's online Evergreen Bootstrapper, open Microsoft's WebView2 page for offline installers or fixed-version packages, or leave the change for later. NVDA keeps using the previous synthesizer until WebView2 is available.</p>
 	<p>If Windows cannot open the download page, the add-on shows the download address in a labeled read-only field and includes a <strong>Copy link</strong> button so you can paste the address into a browser manually.</p>
 	<p>For an online computer, download the Microsoft Edge WebView2 Evergreen Bootstrapper here: <a href="https://go.microsoft.com/fwlink/p/?LinkId=2124703">Download Microsoft Edge WebView2 Runtime</a>.</p>
@@ -155,11 +155,45 @@
 	<p>Google TTS For NVDA is free, open-source software, and donations are completely optional. If you would like to support ongoing development, see the <a href="https://github.com/phamhungvuong302/Google-TTS-For-NVDA/blob/main/DONATE.md">payment methods page on GitHub</a> or choose <strong>Donate...</strong> under <strong>NVDA Menu &rarr; Preferences &rarr; Settings &rarr; Google TTS For NVDA</strong>.</p>
 
 	<h2>Change Log</h2>
-	<h3>Version 1.1 (2026-10-20)</h3>
+	<h3>Version 1.1 (2026-11-28)</h3>
 	<ul>
-		<li><strong>Security update:</strong> Protected internal communication with the Chromium browser runtime by rejecting connections from external web origins.</li>
-		<li><strong>NVDA compatibility:</strong> Updated compatibility for NVDA 2027.1.</li>
-		<li><strong>Updated engine:</strong> Updated the bundled WASM TTS engine to version 2027xxxx.1.</li>
+		<li><strong>More accurate reading progress and smoother pauses:</strong>
+			<ul>
+				<li>Speech progress markers are now synchronized with actual audio playback, so NVDA tracks the spoken position much more accurately during Say All and when interrupting long text.</li>
+				<li>Consecutive clauses and sentences are now processed together more smoothly, reducing awkward delays between sentences while preserving natural spacing.</li>
+				<li>Improved the <strong>Pauses</strong> setting (especially <strong>Shorten all pauses</strong> and <strong>Shorten at end of text only</strong>) with cleaner pause timing, rate-aware scaling, leading-silence trimming, and filtering of faint trailing glitches. Silence detection was also tuned for SeaNet and Lemonbalm voices so short consonant pauses are not clipped.</li>
+			</ul>
+		</li>
+		<li><strong>Better voice quality, more voices, and improved multilingual handling:</strong>
+			<ul>
+				<li>Upgraded pitch shifting and tempo processing on SeaNet and Lemonbalm voices to prevent muffled speech, reduce audio artifacts, and keep high reading speeds clearer when using <strong>Rate</strong> and <strong>Rate boost</strong>.</li>
+				<li>Enabled 8 additional Lemonbalm voice packages with proper base-package dependency tracking (for German, English, Spanish, French, Hindi, and Brazilian Portuguese), bringing the catalog to 168 usable packages.</li>
+				<li>Unified localized language names and language-aware sorting across Speech Settings, Google TTS Voice Manager, and Automatic Language Profiles so all lists show consistent names in the same order.</li>
+				<li>Updated punctuation, emoji, grapheme, and writing-system rules to official Unicode 18.0 and CLDR 49 data, improving sentence splitting and automatic language profile detection for newly assigned characters, emoji flag sequences, halfwidth Katakana sound marks, and additional scripts with limited word spacing.</li>
+			</ul>
+		</li>
+		<li><strong>Stronger security:</strong>
+			<ul>
+				<li>Protected internal communication with the Chromium browser runtime by rejecting WebSocket connections from external web origins.</li>
+				<li>Enforced HTTPS-only connections, secure redirects, and size limits for voice package downloads, and tightened verification and download-directory safety checks in the built-in add-on updater.</li>
+			</ul>
+		</li>
+		<li><strong>Reliability, NVDA 2027.1 compatibility, and support:</strong>
+			<ul>
+				<li>Updated compatibility for NVDA 2027.1 (supporting NVDA 2024.1 through 2027.1) and improved dialog and secure-screen handling across supported NVDA versions.</li>
+				<li>Prevented overlapping speech and rare Windows audio output errors when utterances start, stop, or switch quickly.</li>
+				<li>Bypassed system proxy settings for local browser communication so proxy configurations do not block offline speech. Also improved browser connection cancellation and shutdown, and prevented temporary fallback browser profiles from interfering with an active profile.</li>
+				<li>Added an optional <strong>Support the add-on</strong> section with a <strong>Donate...</strong> button in the Google TTS For NVDA settings category.</li>
+			</ul>
+		</li>
+		<li><strong>Updated components and translations:</strong>
+			<ul>
+				<li>Updated the bundled WASM TTS engine to version 20261110.1.</li>
+				<li>Updated the bundled <code>websocket-client</code> library to version 1.10.0, keeping it isolated from other NVDA add-ons.</li>
+				<li>Updated translations.</li>
+				<li>Updated maintainer contact details and project links.</li>
+			</ul>
+		</li>
 	</ul>
 
 	<h3>Version 1.0 (2026-10-12)</h3>
@@ -219,7 +253,7 @@
 		<li><strong>Chromium Runtime Fallback:</strong> Improved Chrome, Edge, and Brave fallback so Google TTS For NVDA can try another supported browser runtime when the selected one cannot start or is not ready. Edge can now be skipped when WebView2 is missing and another supported runtime is usable. Google TTS For NVDA also waits and retries when the browser is still finishing startup, reducing rare silent startup or browser connection failures.</li>
 		<li><strong>NVDA Compatibility:</strong> Improved compatibility with older and newer NVDA versions across speech, spelling, voice dictionaries, settings, synth switching, the global plugin, and the synth driver. Google TTS also keeps NVDA/app language-change commands from switching Google voices while preserving them for language reporting and character/symbol processing when automatic language profiles are off.</li>
 		<li><strong>Simplified Chinese, Traditional Chinese, and Russian Localization:</strong> Added Simplified Chinese, Traditional Chinese, and Russian UI translations and user documentation. The Chinese locales also include localized add-on metadata.</li>
-		<li><strong>Speech Reliability:</strong> Fixed rare cases where interrupted speech could be replayed incompletely, restored Pitch control for SeaNet voices, and avoided a rare Voice Settings error after switching away from Google TTS. Added the <strong>Pauses</strong> setting for optional pause shortening; enable it from NVDA's Speech Settings dialog (<kbd>NVDA+Ctrl+V</kbd>), with details in the Configuration section.</li>
+		<li><strong>Speech Reliability:</strong> Fixed rare cases where interrupted speech could be replayed incompletely, restored Pitch control for SeaNet voices, and avoided a rare Speech Settings error after switching away from Google TTS. Added the <strong>Pauses</strong> setting for optional pause shortening; enable it from NVDA's Speech Settings dialog (<kbd>NVDA+Ctrl+V</kbd>), with details in the Configuration section.</li>
 		<li><strong>Status Field Accessibility:</strong> Made runtime, automatic language profile, update, Speech Settings notice, and manual URL fallback status fields easier to focus and review without delayed repeated announcements.</li>
 	</ul>
 
@@ -255,6 +289,6 @@
 	<ul>
 		<li>Initial release.</li>
 	</ul>
-	<p>Last edited on 2026-10-20</p>
+	<p>Last edited on 2026-11-28</p>
 </body>
 </html>

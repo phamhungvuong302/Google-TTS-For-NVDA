@@ -54,7 +54,7 @@ msgstr "Giữ runtime trình duyệt của Google TTS sẵn sàng trong &nền"
 
 #: globalPlugins/googleTtsForNvda/__init__.py:468
 msgid "&Maybe later"
-msgstr "Có lẽ để &sau"
+msgstr "Để &sau"
 
 #: globalPlugins/googleTtsForNvda/__init__.py:467
 msgid "&Open Microsoft WebView2 page"
@@ -144,8 +144,8 @@ msgid ""
 "Automatic language profiles are off. Google TTS uses NVDA's normal Speech "
 "Settings for voice, variant, rate, pitch, volume, capitals, and spelling."
 msgstr ""
-"Hồ sơ ngôn ngữ tự động đang tắt. Google TTS sử dụng cấu hình giọng đọc bình "
-"thường của NVDA cho giọng, tên giọng, tốc độ, cao độ, âm lượng, chữ hoa và "
+"Hồ sơ ngôn ngữ tự động đang tắt. Google TTS sử dụng cấu hình giọng đọc thông "
+"thường của NVDA cho giọng, biến thể, tốc độ, cao độ, âm lượng, chữ hoa và "
 "đánh vần."
 
 #: globalPlugins/googleTtsForNvda/settings.py:415
@@ -165,7 +165,7 @@ msgstr ""
 #: globalPlugins/googleTtsForNvda/settings.py:1097
 msgid ""
 "Automatic language profiles were disabled because no languages are selected."
-msgstr "Hồ sơ ngôn ngữ tự động đã bị tắt vì không có ngôn ngữ nào được chọn."
+msgstr "Hồ sơ ngôn ngữ tự động đã được tắt vì chưa chọn ngôn ngữ nào."
 
 #: globalPlugins/googleTtsForNvda/settings.py:427
 msgid "Automatically check for add-on updates when NVDA starts"
@@ -182,7 +182,7 @@ msgstr "Có sẵn để tải xuống"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:488
 msgid "Available. Required by {count} downloadable packages"
-msgstr "Có sẵn. Được {count} gói có thể tải xuống yêu cầu"
+msgstr "Có sẵn. Cần thiết cho {count} gói có thể tải xuống"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:480
 msgid "Available. Required package is installed: {dependency}"
@@ -257,31 +257,31 @@ msgid ""
 "connection and try again."
 msgstr ""
 "Không thể kiểm tra cập nhật Google TTS Cho NVDA. Hãy kiểm tra kết nối "
-"internet của bạn rồi thử lại."
+"internet rồi thử lại."
 
 #: globalPlugins/googleTtsForNvda/updateGui.py:404
 msgid ""
 "Could not check for Google TTS For NVDA updates. The update response was not "
 "understood."
 msgstr ""
-"Không thể kiểm tra cập nhật Google TTS Cho NVDA. Không hiểu được phản hồi "
-"cập nhật."
+"Không thể kiểm tra cập nhật Google TTS Cho NVDA. Không nhận dạng được phản "
+"hồi cập nhật."
 
 #: globalPlugins/googleTtsForNvda/updateGui.py:557
 msgid ""
 "Could not download the Google TTS For NVDA update. Check your internet "
 "connection and try again."
 msgstr ""
-"Không thể tải cập nhật Google TTS Cho NVDA. Hãy kiểm tra kết nối internet "
-"rồi thử lại."
+"Không thể tải xuống cập nhật Google TTS Cho NVDA. Hãy kiểm tra kết nối "
+"internet rồi thử lại."
 
 #: globalPlugins/googleTtsForNvda/updateGui.py:567
 msgid ""
 "Could not download the Google TTS For NVDA update. The download result was "
 "not understood."
 msgstr ""
-"Không thể tải cập nhật Google TTS Cho NVDA. Không hiểu được kết quả tải "
-"xuống."
+"Không thể tải xuống cập nhật Google TTS Cho NVDA. Không nhận dạng được kết "
+"quả tải xuống."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1349
 msgid ""
@@ -336,8 +336,8 @@ msgstr ""
 msgid ""
 "Current Google TTS For NVDA version: {version}. Checking for updates now."
 msgstr ""
-"Phiên bản Google TTS Cho NVDA hiện tại: {version}. Đang kiểm tra cập nhật "
-"ngay bây giờ."
+"Phiên bản Google TTS Cho NVDA hiện tại: {version}. Hiện đang kiểm tra cập "
+"nhật."
 
 #: synthDrivers/googleTtsForNvda/language_utils.py:47
 msgid "Czech"
@@ -379,7 +379,7 @@ msgid ""
 msgstr ""
 "Tải xuống các gói giọng bắt buộc?\n"
 "Đã chọn: {selected}\n"
-"Cũng tải xuống các gói mà lựa chọn của bạn yêu cầu: {dependencies}"
+"Đồng thời tải xuống các gói bắt buộc cho lựa chọn của bạn: {dependencies}"
 
 #: globalPlugins/googleTtsForNvda/updateGui.py:164
 msgid ""
@@ -390,9 +390,9 @@ msgid ""
 "{changes}"
 msgstr ""
 "Kích thước tải xuống: {size}. Phiên bản NVDA tối thiểu: {minimumVersion}. "
-"Phiên bản NVDA đã kiểm tra mới nhất: {lastTestedVersion}.\n"
+"Phiên bản NVDA được thử nghiệm sau cùng: {lastTestedVersion}.\n"
 "\n"
-"Những thay đổi trong phiên bản này:\n"
+"Thay đổi trong phiên bản này:\n"
 "{changes}"
 
 #: globalPlugins/googleTtsForNvda/updateGui.py:220
@@ -433,8 +433,8 @@ msgid ""
 "Downloading Google TTS For NVDA {version}: {percent}% ({received} of "
 "{total})."
 msgstr ""
-"Đang tải xuống Google TTS Cho NVDA {version}: {percent}% ({received} trong "
-"tổng số {total})."
+"Đang tải xuống Google TTS Cho NVDA {version}: {percent}% ({received} trên "
+"{total})."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1141
 msgid "Downloading voice packages..."
@@ -575,7 +575,7 @@ msgstr ""
 "Không thể khởi động Google TTS Cho NVDA vì phiên bản WASM TTS Engine không "
 "được hỗ trợ.\n"
 "\n"
-"Add-on này hỗ trợ WASM TTS Engine phiên bản {supported} nhưng tìm thấy: "
+"Add-on này hỗ trợ WASM TTS Engine phiên bản {supported}, nhưng lại tìm thấy: "
 "{found}.\n"
 "\n"
 "Hãy cài đặt gói Google TTS Cho NVDA có WASM TTS Engine được hỗ trợ."
@@ -603,8 +603,7 @@ msgstr ""
 #: synthDrivers/googleTtsForNvda/bridge.py:2419
 msgid "Google TTS For NVDA could not finish loading the browser speech engine."
 msgstr ""
-"Google TTS Cho NVDA không thể hoàn thành việc tải công cụ giọng nói của "
-"trình duyệt."
+"Google TTS Cho NVDA không thể nạp xong công cụ giọng nói của trình duyệt."
 
 #: synthDrivers/googleTtsForNvda/bridge.py:2521
 #: synthDrivers/googleTtsForNvda/bridge.py:2659
@@ -623,7 +622,7 @@ msgstr "Google TTS Cho NVDA không thể khởi động cầu nối trình duy�
 msgid ""
 "Google TTS For NVDA could not start speech in the Chromium browser runtime."
 msgstr ""
-"Google TTS Cho NVDA không thể bắt đầu nói trong runtime trình duyệt nhân "
+"Google TTS Cho NVDA không thể bắt đầu đọc trong runtime trình duyệt nhân "
 "Chromium."
 
 #: globalPlugins/googleTtsForNvda/updateGui.py:641
@@ -711,9 +710,9 @@ msgid ""
 "\n"
 "Choose Yes to download and install this update."
 msgstr ""
-"Đã có sẵn Google TTS Cho NVDA {version}. Bạn đang sử dụng {currentVersion}.\n"
+"Đã có Google TTS Cho NVDA {version}. Bạn đang sử dụng {currentVersion}.\n"
 "\n"
-"Chọn Có để tải xuống và cài đặt cập nhật này."
+"Chọn Có để tải xuống và cài đặt bản cập nhật này."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1367
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1400
@@ -760,7 +759,7 @@ msgid ""
 "Install at least one language voice package to use automatic language "
 "profiles."
 msgstr ""
-"Cài đặt ít nhất một gói giọng cho một ngôn ngữ để sử dụng hồ sơ ngôn ngữ tự "
+"Hãy cài đặt gói giọng cho ít nhất một ngôn ngữ để sử dụng hồ sơ ngôn ngữ tự "
 "động."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:109
@@ -864,7 +863,8 @@ msgid ""
 "Bootstrapper. Choose Open Microsoft WebView2 page if you need an offline "
 "installer or a fixed-version package."
 msgstr ""
-"Microsoft Edge có sẵn nhưng Microsoft Edge WebView2 Runtime không có sẵn.\n"
+"Máy tính đã có Microsoft Edge nhưng chưa có Microsoft Edge WebView2 "
+"Runtime.\n"
 "\n"
 "Google TTS Cho NVDA cần có WebView2 khi Microsoft Edge là runtime trình "
 "duyệt nhân Chromium. NVDA sẽ tiếp tục sử dụng bộ đọc trước đó cho tới khi "
@@ -927,7 +927,7 @@ msgid ""
 "No Google TTS For NVDA voice packages are installed. Open Google TTS Voice "
 "Manager to download a voice package."
 msgstr ""
-"Không có gói giọng Google TTS Cho NVDA nào được cài đặt. Mở Trình quản lý "
+"Chưa có gói giọng Google TTS Cho NVDA nào được cài đặt. Hãy mở Trình quản lý "
 "giọng Google TTS để tải xuống một gói giọng."
 
 #: globalPlugins/googleTtsForNvda/__init__.py:430
@@ -941,7 +941,7 @@ msgid ""
 "You can also open Voice Manager later from NVDA Menu > Tools > Google TTS "
 "Voice Manager, or press NVDA+Ctrl+Shift+G."
 msgstr ""
-"Không có giọng Google TTS Cho NVDA nào được cài đặt.\n"
+"Chưa có giọng Google TTS Cho NVDA nào được cài đặt.\n"
 "\n"
 "Nhấn Đồng ý để mở Trình quản lý giọng Google TTS và tải xuống một gói "
 "giọng.\n"
@@ -959,7 +959,7 @@ msgid ""
 "package.\n"
 "Press Cancel to keep using your current synthesizer for now."
 msgstr ""
-"Không thể sử dụng giọng Google TTS Cho NVDA đã cài đặt nào.\n"
+"Không có giọng Google TTS Cho NVDA đã cài đặt nào có thể sử dụng.\n"
 "\n"
 "Nhấn Đồng ý để mở Trình quản lý giọng Google TTS và cài đặt gói giọng khác.\n"
 "Nhấn Hủy bỏ để tạm thời tiếp tục dùng bộ đọc hiện tại."
@@ -972,9 +972,9 @@ msgid ""
 "Microsoft Edge, or Brave, or set CHROME_PATH, EDGE_PATH, or BRAVE_PATH to a "
 "browser executable."
 msgstr ""
-"Không tìm thấy runtime trình duyệt nhân Chromium được hỗ trợ. Hãy cài đặt "
-"Google Chrome, Microsoft Edge hay Brave hoặc đặt CHROME_PATH, EDGE_PATH hay "
-"BRAVE_PATH tới tập tin thực thi của trình duyệt."
+"Không tìm thấy runtime trình duyệt nhân Chromium nào được hỗ trợ. Hãy cài "
+"đặt Google Chrome, Microsoft Edge hoặc Brave, hoặc đặt CHROME_PATH, "
+"EDGE_PATH hay BRAVE_PATH trỏ tới tập tin thực thi của trình duyệt."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1005
 msgid "No voice packages are checked for download."
@@ -1000,12 +1000,11 @@ msgstr "Không được công cụ đi kèm hỗ trợ"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:452
 msgid "Not usable. Missing required package: {dependency}"
-msgstr "Không thể sử dụng được. Thiếu gói bắt buộc: {dependency}"
+msgstr "Không thể sử dụng. Thiếu gói bắt buộc: {dependency}"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:456
 msgid "Not usable. Required package is not usable: {dependency}"
-msgstr ""
-"Không thể sử dụng được. Gói bắt buộc không thể sử dụng được: {dependency}"
+msgstr "Không thể sử dụng. Gói bắt buộc không thể sử dụng: {dependency}"
 
 #: synthDrivers/googleTtsForNvda/language_utils.py:91
 msgid "Odia"
@@ -1110,7 +1109,7 @@ msgid ""
 msgstr ""
 "Xóa bỏ {count} gói?\n"
 "Đã chọn: {selected}\n"
-"Cũng xóa bỏ các gói phụ thuộc vào lựa chọn của bạn: {dependents}"
+"Đồng thời xóa bỏ các gói phụ thuộc vào lựa chọn của bạn: {dependents}"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1179
 msgid ""
@@ -1159,7 +1158,7 @@ msgstr "Tiếng Santali"
 #: globalPlugins/googleTtsForNvda/settings.py:1030
 msgid ""
 "Select at least one language profile to use automatic language profiles."
-msgstr "Chọn ít nhất một hồ sơ ngôn ngữ để sử dụng hồ sơ ngôn ngữ tự động."
+msgstr "Hãy chọn ít nhất một hồ sơ ngôn ngữ để sử dụng hồ sơ ngôn ngữ tự động."
 
 #: globalPlugins/googleTtsForNvda/settings.py:685
 msgid ""
@@ -1254,9 +1253,9 @@ msgid ""
 "The browser profile used by Google TTS For NVDA is already in use. Restart "
 "NVDA, or close any leftover supported Chromium browser helper processes."
 msgstr ""
-"Hồ sơ trình duyệt mà Google TTS Cho NVDA sử dụng đang được dùng. Hãy khởi "
-"động lại NVDA hoặc đóng mọi tiến trình trợ giúp của trình duyệt nhân "
-"Chromium được hỗ trợ còn sót lại."
+"Hồ sơ trình duyệt của Google TTS Cho NVDA hiện đang được sử dụng. Hãy khởi "
+"động lại NVDA hoặc đóng mọi tiến trình nền còn sót lại của trình duyệt nhân "
+"Chromium được hỗ trợ."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1011
 msgid ""
@@ -1275,7 +1274,7 @@ msgstr ""
 #: synthDrivers/googleTtsForNvda/bridge.py:2296
 #: synthDrivers/googleTtsForNvda/bridge.py:2343
 msgid "The Chromium browser runtime connection closed unexpectedly."
-msgstr "Kết nối runtime trình duyệt nhân Chromium đã đóng bất ngờ."
+msgstr "Kết nối tới runtime trình duyệt nhân Chromium bị ngắt đột ngột."
 
 #: synthDrivers/googleTtsForNvda/bridge.py:2326
 msgid "The Chromium browser runtime did not respond in time."
@@ -1318,8 +1317,8 @@ msgid ""
 "this engine can use. Open Google TTS Voice Manager to install another voice "
 "package."
 msgstr ""
-"Các gói giọng Google TTS Cho NVDA đã cài đặt không bao gồm giọng nói nào mà "
-"công cụ này có thể sử dụng. Mở Trình quản lý giọng Google TTS để cài đặt gói "
+"Các gói giọng Google TTS Cho NVDA đã cài đặt không có giọng nào mà công cụ "
+"này có thể sử dụng. Hãy mở Trình quản lý giọng Google TTS để cài đặt gói "
 "giọng khác."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:683
@@ -1327,8 +1326,8 @@ msgid ""
 "The last usable voice package was kept because Google TTS For NVDA is still "
 "the current synthesizer."
 msgstr ""
-"Gói giọng có thể sử dụng được cuối cùng đã được giữ lại vì Google TTS Cho "
-"NVDA vẫn là bộ đọc hiện tại."
+"Gói giọng có thể sử dụng cuối cùng đã được giữ lại vì Google TTS Cho NVDA "
+"vẫn là bộ đọc hiện tại."
 
 #: globalPlugins/googleTtsForNvda/uiUtils.py:542
 msgid "The link could not be copied to the clipboard."
@@ -1361,7 +1360,8 @@ msgstr "Không thể mở hộp thoại Chọn bộ đọc."
 msgid ""
 "The update was downloaded, but NVDA could not start the add-on installer."
 msgstr ""
-"Đã tải xuống cập nhật nhưng NVDA không thể khởi động trình cài đặt add-on."
+"Đã tải xuống bản cập nhật nhưng NVDA không thể khởi động trình cài đặt add-"
+"on."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1337
 msgid ""
@@ -1413,21 +1413,20 @@ msgstr "Tiếng Urdu (Pakistan)"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:473
 msgid "Usable"
-msgstr "Có thể sử dụng được"
+msgstr "Có thể sử dụng"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:470
 msgid "Usable. Required by {count} installed packages"
-msgstr "Có thể sử dụng được. Được {count} gói đã cài đặt yêu cầu"
+msgstr "Có thể sử dụng. Cần thiết cho {count} gói đã cài đặt"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:466
 msgid "Usable. Requires {dependency}"
-msgstr "Có thể sử dụng được. Yêu cầu {dependency}"
+msgstr "Có thể sử dụng. Yêu cầu {dependency}"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:462
 msgid "Usable. Requires {dependency}; required by {count} installed packages"
 msgstr ""
-"Có thể sử dụng được. Yêu cầu {dependency}; được {count} gói đã cài đặt yêu "
-"cầu"
+"Có thể sử dụng. Yêu cầu {dependency}; cần thiết cho {count} gói đã cài đặt"
 
 #: globalPlugins/googleTtsForNvda/settings.py:320
 msgid "Use automatic language profiles"
@@ -1455,16 +1454,42 @@ msgstr "Sử dụng hồ sơ ngôn ngữ này"
 #: manifest.ini:changelog
 msgid ""
 "Version 1.1:\n"
-"- Security update: Protected internal communication with the Chromium "
-"browser runtime by rejecting connections from external web origins.\n"
-"- Compatibility with NVDA 2027.1.\n"
-"- Updated the bundled WASM TTS engine to version 2027xxxx.1."
+"- Synchronized speech progress with audio playback for more accurate Say All "
+"tracking and interruption, and made multi-sentence reading and pause "
+"shortening smoother and cleaner.\n"
+"- Improved high-speed speech and pitch quality on SeaNet and Lemonbalm "
+"voices, enabled 8 additional Lemonbalm voice packages (168 usable packages "
+"in total), and unified localized language names and sorting across NVDA.\n"
+"- Updated multilingual text handling to Unicode 18.0 and CLDR 49 for more "
+"accurate punctuation, emoji, writing-system, and automatic language profile "
+"support.\n"
+"- Strengthened security by blocking external web origins from local browser "
+"communication and enforcing stricter HTTPS and download checks for voice "
+"packages and add-on updates.\n"
+"- Improved audio and browser runtime stability (including bypassing system "
+"proxies for local speech), updated compatibility for NVDA 2027.1, and added "
+"an optional Donate... button in add-on settings.\n"
+"- Upgraded the bundled WASM TTS engine to version 20261110.1 and websocket-"
+"client to 1.10.0, and updated translations."
 msgstr ""
 "Phiên bản 1.1:\n"
-"- Cập nhật bảo mật: Tăng cường bảo vệ kênh giao tiếp nội bộ với runtime "
-"trình duyệt Chromium, ngăn chặn các kết nối từ các trang web bên ngoài.\n"
-"- Tương thích với NVDA 2027.1.\n"
-"- Nâng công cụ WASM TTS đi kèm lên phiên bản 2027xxxx.1."
+"- Đồng bộ tiến độ đọc với âm thanh phát ra giúp NVDA theo dõi vị trí đọc "
+"chính xác hơn khi Đọc toàn bộ và khi ngắt đọc, đồng thời giúp việc đọc nhiều "
+"câu liên tiếp và rút ngắn khoảng lặng mượt mà, tự nhiên hơn.\n"
+"- Cải thiện chất lượng đọc tốc độ cao và đổi cao độ trên các giọng SeaNet và "
+"Lemonbalm, mở thêm 8 gói giọng Lemonbalm (nâng tổng số gói sử dụng được lên "
+"168) và thống nhất tên ngôn ngữ cùng thứ tự sắp xếp trên toàn NVDA.\n"
+"- Cập nhật xử lý văn bản đa ngôn ngữ lên Unicode 18.0 và CLDR 49 giúp xử lý "
+"chính xác hơn dấu câu, biểu tượng cảm xúc, hệ chữ và hồ sơ ngôn ngữ tự "
+"động.\n"
+"- Tăng cường bảo mật bằng cách chặn kết nối từ các trang web bên ngoài tới "
+"kênh giao tiếp trình duyệt nội bộ, đồng thời áp dụng kiểm tra HTTPS và giới "
+"hạn tải xuống chặt chẽ hơn cho gói giọng và bản cập nhật add-on.\n"
+"- Nâng cao độ ổn định của âm thanh và runtime trình duyệt (bao gồm bỏ qua "
+"proxy hệ thống cho giao tiếp nội bộ), cập nhật tương thích với NVDA 2027.1 "
+"và bổ sung nút Ủng hộ... không bắt buộc trong cấu hình add-on.\n"
+"- Nâng cấp công cụ WASM TTS đi kèm lên phiên bản 20261110.1, thư viện "
+"websocket-client lên 1.10.0 và cập nhật bản dịch."
 
 #: synthDrivers/googleTtsForNvda/language_utils.py:116
 msgid "Vietnamese"
@@ -1482,14 +1507,15 @@ msgid ""
 "Open the Google TTS For NVDA category in NVDA Settings and turn off "
 "automatic language profiles, then open Voice dictionary again."
 msgstr ""
-"Tùy chọn từ điển giọng đọc không có sẵn khi hồ sơ ngôn ngữ tự động đang "
+"Tùy chọn Từ điển giọng đọc không khả dụng khi hồ sơ ngôn ngữ tự động đang "
 "bật.\n"
 "\n"
-"Google TTS Cho NVDA có thể chuyển đổi giữa nhiều tên giọng trong hồ sơ khi "
-"nói, nên NVDA không thể biết cần chỉnh sửa từ điển cho riêng tên giọng nào.\n"
+"Google TTS Cho NVDA có thể chuyển đổi giữa nhiều biến thể trong các hồ sơ "
+"khi đọc, nên NVDA không thể biết cần chỉnh sửa từ điển giọng đọc của biến "
+"thể cụ thể nào.\n"
 "\n"
-"Mở danh mục Google TTS Cho NVDA trong cấu hình NVDA và tắt hồ sơ ngôn ngữ tự "
-"động, sau đó mở lại từ điển giọng đọc."
+"Hãy mở danh mục Google TTS Cho NVDA trong Cấu hình NVDA và tắt hồ sơ ngôn "
+"ngữ tự động, sau đó mở lại Từ điển giọng đọc."
 
 #: synthDrivers/googleTtsForNvda/voice_store.py:73
 msgid "Voice package downloads must remain on a secure HTTPS connection."
@@ -1525,8 +1551,8 @@ msgid ""
 "Voice settings are managed by automatic language profiles. Open the Google "
 "TTS For NVDA category in NVDA Settings to configure them."
 msgstr ""
-"Các cấu hình giọng đọc đang được quản lý bằng hồ sơ ngôn ngữ tự động. Hãy mở "
-"danh mục Google TTS Cho NVDA trong cấu hình NVDA để thiết lập."
+"Các thiết lập giọng đọc hiện do hồ sơ ngôn ngữ tự động quản lý. Hãy mở danh "
+"mục Google TTS Cho NVDA trong Cấu hình NVDA để thiết lập."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:223
 msgid "Voices"
@@ -1545,12 +1571,12 @@ msgid ""
 "Waiting for you to switch away from Google TTS For NVDA before removing the "
 "last usable voice package."
 msgstr ""
-"Đang chờ bạn chuyển khỏi Google TTS Cho NVDA trước khi xóa bỏ gói giọng còn "
-"sử dụng được cuối cùng."
+"Đang chờ bạn chuyển khỏi Google TTS Cho NVDA trước khi xóa bỏ gói giọng có "
+"thể sử dụng cuối cùng."
 
 #: globalPlugins/googleTtsForNvda/settings.py:672
 msgid "WebView2 Runtime missing"
-msgstr "thiếu WebView2 Runtime"
+msgstr "Thiếu WebView2 Runtime"
 
 #: synthDrivers/googleTtsForNvda/language_utils.py:48
 msgid "Welsh"
@@ -1566,13 +1592,13 @@ msgid ""
 "\n"
 "Choose Yes to remove these packages. Choose No to keep them installed."
 msgstr ""
-"Bạn sắp xóa bỏ gói giọng còn sử dụng được cuối cùng. Sau khi bị xóa, Google "
+"Bạn sắp xóa bỏ gói giọng có thể sử dụng cuối cùng. Sau khi bị xóa, Google "
 "TTS Cho NVDA sẽ không còn bất kỳ giọng nào cho đến khi bạn tải xuống gói "
 "khác.\n"
 "\n"
 "Các gói cần xóa, bao gồm các gói phụ thuộc: {packages}\n"
 "\n"
-"Chọn Có để xóa bỏ các gói này. Chọn Không để giữ chúng được cài đặt."
+"Chọn Có để xóa bỏ các gói này. Chọn Không để giữ lại các gói này."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:635
 msgid ""
@@ -1585,14 +1611,14 @@ msgid ""
 "Choose Yes to open Select Synthesizer and switch first. Choose No to keep "
 "this package installed."
 msgstr ""
-"Bạn sắp xóa bỏ gói giọng còn sử dụng được cuối cùng. Google TTS Cho NVDA "
-"hiện đang được chọn làm bộ đọc của bạn, vì vậy add-on cần ít nhất một giọng "
-"để tiếp tục nói.\n"
+"Bạn sắp xóa bỏ gói giọng có thể sử dụng cuối cùng. Google TTS Cho NVDA hiện "
+"đang được chọn làm bộ đọc của bạn, vì vậy add-on cần ít nhất một giọng để "
+"tiếp tục đọc.\n"
 "\n"
 "Các gói cần xóa, bao gồm các gói phụ thuộc: {packages}\n"
 "\n"
-"Chọn Có để mở hộp thoại Chọn bộ đọc và chuyển trước. Chọn Không để giữ gói "
-"này được cài đặt."
+"Chọn Có để mở hộp thoại Chọn bộ đọc và chuyển trước. Chọn Không để giữ lại "
+"gói này."
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:296
 msgid ""
@@ -1613,7 +1639,7 @@ msgstr "{language} ({count} giọng)"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1130
 msgid "{message} Also downloaded required packages: {packages}"
-msgstr "{message} Cũng đã tải xuống các gói bắt buộc: {packages}"
+msgstr "{message} Đã tải thêm các gói bắt buộc: {packages}"
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1123
 msgid "{message} Skipped packages not supported by this engine: {packages}"
@@ -1621,7 +1647,7 @@ msgstr "{message} Đã bỏ qua các gói không được công cụ này hỗ t
 
 #: globalPlugins/googleTtsForNvda/voiceManager.py:1264
 msgid "{message} The current variant was reset to {voice}."
-msgstr "{message} Tên giọng hiện tại đã được đặt lại thành {voice}."
+msgstr "{message} Biến thể hiện tại đã được đặt lại thành {voice}."
 
 #: synthDrivers/googleTtsForNvda/voice_store.py:586
 msgid "{package} is already installed."
@@ -1648,7 +1674,7 @@ msgstr ""
 msgid ""
 "{selectedStatus} Falling back to active Chromium browser runtime: {runtime}."
 msgstr ""
-"{selectedStatus} Quay lại runtime trình duyệt nhân Chromium đang hoạt động: "
+"{selectedStatus} Đang dùng runtime trình duyệt nhân Chromium dự phòng: "
 "{runtime}."
 
 #: globalPlugins/googleTtsForNvda/settings.py:698
